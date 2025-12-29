@@ -285,55 +285,6 @@ impl Downloader {
                 current_active += 1;
 
                 tokio::spawn(async move {
-                    let res = async {
-                        let mut chunk_file = std::fs::OpenOptions::new().write(true).open(&filepath)?;
-                        let current_start = chunk.start + chunk.downloaded;
-                        chunk_file.seek(SeekFrom::Start(current_start))?;
-
-                        let range = format!("bytes={}-{}", current_start, chunk.end);
-                        let response = client.get(url).header("Range", range).send().await?;
-
-                        if response.status() == 429 || response.status() == 503 {
-                            *throttled_ptr.lock().unwrap() = true;
-                            return Err(DownloadError::Network("Server throttling".to_string()));
-                        }
-
-                        let mut stream = response.bytes_stream();
-                        let mut local_downloaded = chunk.downloaded;
-                        let mut last_db_update = std::time::Instant::now();
-
-                        while let Some(item) = stream.next().await {
-                            let bytes = item.map_err(|e| DownloadError::Network(e.to_string()))?;
-                            chunk_file.write_all(&bytes)?;
-                            let len = bytes.len() as u64;
-                            local_downloaded += len;
-
-                            {
-                                let mut p = progress.lock().unwrap();
-                                p.downloaded += len;
-                                p.connections = *active_ptr.lock().unwrap();
-                                
-                                let elapsed = start_time_clone.elapsed().as_secs_f64();
-                                if elapsed > 0.1 {
-                                    let bytes_since_start = p.downloaded - initial_downloaded_clone;
-                                    p.speed = (bytes_since_start as f64 / elapsed) as u64;
-                                    if p.speed > 0 {
-                                        p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
-                                    }
-                                }
-                                (on_progress_cb)(p.clone());
-                            }
-
-                            if last_db_update.elapsed().as_secs() >= 1 {
-                                if let Some(ref db) = db_path_clone {
-                                    crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
-                                }
-                                last_db_update = std::time::Instant::now();
-                            }
-                        }
-
-                        if let Some(ref db) = db_path_clone {
-                            crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
                         }
                         Ok(())
                     }.await;

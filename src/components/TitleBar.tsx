@@ -3,9 +3,33 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export function TitleBar() {
     const appWindow = getCurrentWindow();
-    const handleMinimize = () => appWindow.minimize();
-    const handleMaximize = () => appWindow.toggleMaximize();
-    const handleClose = () => appWindow.close();
+
+    const handleMinimize = async () => {
+        console.log("Minimize clicked");
+        try {
+            await appWindow.minimize();
+        } catch (e) {
+            console.error("Minimize error:", e);
+        }
+    };
+
+    const handleMaximize = async () => {
+        console.log("Maximize clicked");
+        try {
+            await appWindow.toggleMaximize();
+        } catch (e) {
+            console.error("Maximize error:", e);
+        }
+    };
+
+    const handleClose = async () => {
+        console.log("Close clicked");
+        try {
+            await appWindow.close();
+        } catch (e) {
+            console.error("Close error:", e);
+        }
+    };
 
     return (
         <div className="h-10 w-full flex items-center justify-between px-4 drag-region select-none z-50 bg-brand-primary border-b border-transparent">
