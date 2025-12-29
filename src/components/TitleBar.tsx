@@ -1,4 +1,5 @@
 import { Minus, Square, X } from "lucide-react";
+import logo from "../assets/logo.png";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export function TitleBar() {
@@ -34,11 +35,13 @@ export function TitleBar() {
     return (
         <div className="h-10 w-full flex items-center justify-between px-4 drag-region select-none z-50 bg-brand-primary border-b border-transparent">
             {/* Logo area */}
-            <div className="flex items-center gap-2.5 opacity-90 hover:opacity-100 transition-opacity duration-300">
-                <div className="w-6 h-6 rounded-md bg-brand-secondary border border-surface-border flex items-center justify-center">
-                    <span className="text-text-primary font-bold text-xs">C</span>
-                </div>
-                <span className="text-sm font-semibold text-text-primary tracking-tight">
+            <div className="flex items-center gap-3 opacity-90 hover:opacity-100 transition-opacity duration-300">
+                <img
+                    src={logo}
+                    alt="Ciel Logo"
+                    className="h-6 w-auto object-contain filter drop-shadow-[0_0_8px_rgba(255,255,255,0.15)]"
+                />
+                <span className="text-sm font-bold text-text-primary tracking-tight">
                     Ciel
                 </span>
             </div>

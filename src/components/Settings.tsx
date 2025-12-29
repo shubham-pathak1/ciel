@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle } from "lucide-react";
+import logo from "../assets/logo.png";
+import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 
@@ -148,12 +149,20 @@ export function Settings() {
                         </div>
                     </div>
                 );
+
+
+            // ... inside the component ...
+
             case "about":
                 return (
                     <div className="space-y-8 text-center py-8 animate-fade-in">
-                        <div className="relative w-20 h-20 mx-auto">
-                            <div className="relative w-full h-full bg-brand-secondary rounded-2xl border border-surface-border flex items-center justify-center">
-                                <span className="text-3xl font-bold text-text-primary">C</span>
+                        <div className="relative w-32 h-32 mx-auto">
+                            <div className="relative w-full h-full flex items-center justify-center p-4">
+                                <img
+                                    src={logo}
+                                    alt="Ciel Logo"
+                                    className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(255,255,255,0.1)]"
+                                />
                             </div>
                         </div>
 
@@ -170,16 +179,25 @@ export function Settings() {
                             </p>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-4 max-w-sm mx-auto">
-                            {['GitHub', 'Website', 'License'].map((link) => (
-                                <a
-                                    key={link}
-                                    href="#"
-                                    className="px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-xs text-text-secondary hover:text-text-primary transition-all text-center border border-surface-border"
-                                >
-                                    {link}
-                                </a>
-                            ))}
+                        <div className="grid grid-cols-2 gap-4 max-w-sm mx-auto">
+                            <a
+                                href="https://github.com/shubham-pathak1/ciel"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
+                            >
+                                <Github size={16} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
+                                GitHub
+                            </a>
+                            <a
+                                href="https://github.com/shubham-pathak1/ciel/blob/main/LICENSE"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
+                            >
+                                <FileText size={16} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
+                                License
+                            </a>
                         </div>
                     </div>
                 );
