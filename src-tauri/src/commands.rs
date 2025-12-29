@@ -54,11 +54,17 @@ fn resolve_download_path(db_path: &str, provided_path: &str) -> String {
         .unwrap_or_default();
 
     let base_dir = if !configured_path.is_empty() {
-        PathBuf::from(configured_path)
+        let path = PathBuf::from(&configured_path);
+        if path.is_absolute() {
+            path
+        } else {
+            // Resolve relative path against current directory or executable location
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
+        }
     } else {
         UserDirs::new()
             .and_then(|dirs| dirs.download_dir().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     };
 
     // If provided path is simply a filename or relative like ./file
