@@ -100,7 +100,7 @@ struct WorkChunk {
     start: u64,
     end: u64,
     downloaded: u64,
-    index: usize, // Index in the original chunk list
+    _index: usize, // Index in the original chunk list
 }
 
 /// Multi-connection downloader
@@ -196,7 +196,7 @@ impl Downloader {
                         start: c.start as u64,
                         end: c.end as u64,
                         downloaded: c.downloaded as u64,
-                        index: i,
+                        _index: i,
                     }).collect();
                 }
             }
@@ -221,7 +221,7 @@ impl Downloader {
                     start,
                     end,
                     downloaded: 0,
-                    index: i as usize,
+                    _index: i as usize,
                 });
                 db_chunks_to_insert.push(ChunkRecord {
                     download_id: self.config.id.clone(),

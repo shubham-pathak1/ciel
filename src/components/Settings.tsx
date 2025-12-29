@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Folder, Globe, Gauge, Shield, Info, Check, Save } from "lucide-react";
+import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 
@@ -20,6 +20,7 @@ export function Settings() {
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
+    const [hasActiveDownloads, setHasActiveDownloads] = useState(false);
 
     useEffect(() => {
         loadSettings();
@@ -34,6 +35,11 @@ export function Settings() {
                 auto_resume: result.auto_resume || "true",
                 theme: result.theme || "dark",
             });
+
+            // Check for active downloads
+            const downloads = await invoke<any[]>("get_downloads");
+            const active = downloads.some(d => d.status === "downloading");
+            setHasActiveDownloads(active);
         } catch (err) {
             console.error("Failed to load settings:", err);
         }
@@ -91,6 +97,19 @@ export function Settings() {
             case "network":
                 return (
                     <div className="space-y-8 animate-fade-in">
+                        {hasActiveDownloads && (
+                            <div className="flex items-start gap-3 p-4 rounded-lg bg-status-warning/10 border border-status-warning/20 text-status-warning">
+                                <AlertTriangle size={18} className="mt-0.5" />
+                                <div>
+                                    <h4 className="text-sm font-medium mb-1">Active Downloads Detected</h4>
+                                    <p className="text-xs opacity-90">
+                                        Changes to connection limits will only apply to new downloads.
+                                        <strong> Pause and resume</strong> active downloads to apply the new limit.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+
                         <div className="space-y-4">
                             <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Concurrent Connections</label>
                             <div className="flex items-center gap-4">

@@ -83,6 +83,13 @@ pub async fn add_download(
     filepath: String,
 ) -> Result<Download, String> {
     let resolved_path = resolve_download_path(&db_state.path, &filepath);
+
+    // Get max connections from settings
+    let max_connections = db::get_setting(&db_state.path, "max_connections")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(8);
     
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
@@ -95,7 +102,7 @@ pub async fn add_download(
         status: DownloadStatus::Downloading,
         protocol: DownloadProtocol::Http,
         speed: 0,
-        connections: 4,
+        connections: max_connections,
         created_at: chrono::Utc::now().to_rfc3339(),
         completed_at: None,
         error_message: None,
@@ -249,7 +256,16 @@ pub async fn resume_download(
     id: String,
 ) -> Result<(), String> {
     let downloads = db::get_all_downloads(&db_state.path).map_err(|e| e.to_string())?;
-    let download = downloads.iter().find(|d| d.id == id).ok_or("Download not found")?;
+    let mut download = downloads.into_iter().find(|d| d.id == id).ok_or("Download not found")?.clone();
+
+    // Update connections from settings
+    let max_connections = db::get_setting(&db_state.path, "max_connections")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(8);
+    
+    download.connections = max_connections;
 
     if download.status == DownloadStatus::Completed {
         return Err("Download already completed".to_string());
