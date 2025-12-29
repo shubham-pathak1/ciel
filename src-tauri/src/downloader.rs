@@ -1,0 +1,438 @@
+use futures::StreamExt;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::io::{Seek, SeekFrom, Write, Read};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use sha2::{Sha256, Digest};
+use std::fs::File;
+use thiserror::Error;
+use tokio::sync::mpsc;
+
+/// Download engine errors
+#[derive(Error, Debug, Clone, Serialize)]
+pub enum DownloadError {
+    #[error("Network error: {0}")]
+    Network(String),
+
+    #[error("IO error: {0}")]
+    Io(String),
+
+    #[error("Server does not support range requests")]
+    NoRangeSupport,
+
+    #[error("Download cancelled")]
+    Cancelled,
+
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(String),
+}
+
+impl From<reqwest::Error> for DownloadError {
+    fn from(err: reqwest::Error) -> Self {
+        DownloadError::Network(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for DownloadError {
+    fn from(err: std::io::Error) -> Self {
+        DownloadError::Io(err.to_string())
+    }
+}
+
+/// Download configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadConfig {
+    pub id: String, // Added id
+    /// URL to download from
+    pub url: String,
+    /// Target file path
+    pub filepath: PathBuf,
+    /// Number of connections to use
+    pub connections: u8,
+    /// Chunk size in bytes (default: 5MB)
+    pub chunk_size: u64,
+    /// Speed limit in bytes per second (0 = unlimited)
+    pub speed_limit: u64,
+}
+
+impl Default for DownloadConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            url: String::new(),
+            filepath: PathBuf::new(),
+            connections: 4,
+            chunk_size: 5 * 1024 * 1024, // 5 MB
+            speed_limit: 0,
+        }
+    }
+}
+
+/// Download progress information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadProgress {
+    pub id: String, // Added id
+    /// Total size in bytes
+    pub total: u64,
+    /// Downloaded bytes
+    pub downloaded: u64,
+    /// Current speed in bytes per second
+    pub speed: u64,
+    /// Estimated time remaining in seconds
+    pub eta: u64,
+    /// Active connections
+    pub connections: u8,
+}
+
+/// Chunk record for database persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkRecord {
+    pub download_id: String,
+    pub start: i64,
+    pub end: i64,
+    pub downloaded: i64,
+}
+
+/// Chunk information for active download
+#[derive(Debug, Clone, Copy)]
+struct WorkChunk {
+    start: u64,
+    end: u64,
+    downloaded: u64,
+    index: usize, // Index in the original chunk list
+}
+
+/// Multi-connection downloader
+pub struct Downloader {
+    client: Client,
+    config: DownloadConfig,
+    progress: Arc<Mutex<DownloadProgress>>,
+    db_path: Option<String>,
+}
+
+impl Downloader {
+    pub fn new(config: DownloadConfig) -> Self {
+        let progress = Arc::new(Mutex::new(DownloadProgress {
+            id: config.id.clone(),
+            total: 0,
+            downloaded: 0,
+            speed: 0,
+            eta: 0,
+            connections: config.connections,
+        }));
+
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+
+        Self {
+            client,
+            config,
+            progress,
+            db_path: None,
+        }
+    }
+
+    pub fn with_db(mut self, db_path: String) -> Self {
+        self.db_path = Some(db_path);
+        self
+    }
+
+    pub async fn verify_checksum(&self, expected_hash: &str) -> Result<bool, DownloadError> {
+        let filepath = &self.config.filepath;
+        let mut file = File::open(filepath)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 { break; }
+            hasher.update(&buffer[..count]);
+        }
+
+        let result = hasher.finalize();
+        let hex_result = format!("{:x}", result);
+        Ok(hex_result == expected_hash.to_lowercase())
+    }
+
+    pub async fn download<F>(&self, on_progress: F) -> Result<(), DownloadError>
+    where
+        F: Fn(DownloadProgress) + Send + Sync + 'static,
+    {
+        let url = self.config.url.clone();
+        let (supports_range, total_size) = check_range_support(&self.client, &url).await?;
+
+        {
+            let mut p = self.progress.lock().unwrap();
+            p.total = total_size;
+        }
+
+        if !supports_range || total_size == 0 || self.config.connections <= 1 {
+            return self.download_single_connection(on_progress).await;
+        }
+
+        // Prepare File (don't truncate if it exists for resume)
+        let file_exists = self.config.filepath.exists();
+        if !file_exists {
+            let f = std::fs::File::create(&self.config.filepath)?;
+            f.set_len(total_size)?;
+        }
+
+        // Get chunks from DB if possible
+        let mut chunks = Vec::new();
+        if let Some(ref db_path) = self.db_path {
+            if let Ok(db_chunks) = crate::db::get_download_chunks(db_path, &self.config.id) {
+                if !db_chunks.is_empty() {
+                    chunks = db_chunks.into_iter().enumerate().map(|(i, c)| WorkChunk {
+                        start: c.start as u64,
+                        end: c.end as u64,
+                        downloaded: c.downloaded as u64,
+                        index: i,
+                    }).collect();
+                }
+            }
+        }
+
+        // If no chunks, calculate them
+        if chunks.is_empty() {
+            let connections = self.config.connections as u64;
+            // Use more chunks than workers for better distribution if scaling
+            let num_chunks = connections * 2; 
+            let chunk_size = total_size / num_chunks;
+            let mut db_chunks_to_insert = Vec::new();
+
+            for i in 0..num_chunks {
+                let start = i * chunk_size;
+                let end = if i == num_chunks - 1 {
+                    total_size - 1
+                } else {
+                    (i + 1) * chunk_size - 1
+                };
+                chunks.push(WorkChunk {
+                    start,
+                    end,
+                    downloaded: 0,
+                    index: i as usize,
+                });
+                db_chunks_to_insert.push(ChunkRecord {
+                    download_id: self.config.id.clone(),
+                    start: start as i64,
+                    end: end as i64,
+                    downloaded: 0,
+                });
+            }
+
+            if let Some(ref db_path) = self.db_path {
+                crate::db::insert_chunks(db_path, db_chunks_to_insert).ok();
+            }
+        }
+
+        let total_downloaded = chunks.iter().map(|c| c.downloaded).sum();
+        {
+            let mut p = self.progress.lock().unwrap();
+            p.downloaded = total_downloaded;
+        }
+
+        // State for dynamic scaling
+        let pending_chunks = Arc::new(Mutex::new(chunks.into_iter().filter(|c| c.downloaded < (c.end - c.start + 1)).collect::<Vec<_>>()));
+        let active_workers = Arc::new(Mutex::new(0u8));
+        let max_workers = self.config.connections;
+        let start_time = std::time::Instant::now();
+        let initial_downloaded_at_start = total_downloaded;
+        let on_progress_arc = Arc::new(on_progress);
+        let error_occurred = Arc::new(Mutex::new(None));
+        let throttled = Arc::new(Mutex::new(false));
+
+        // Start with 2 workers
+        let mut current_target_workers = 2u8.min(max_workers);
+        
+        // Channel to signal worker completion or scaling
+        let (worker_tx, mut worker_rx) = mpsc::channel::<()>(32);
+
+        loop {
+            // Check for errors
+            if let Some(err) = error_occurred.lock().unwrap().clone() {
+                return Err(err);
+            }
+
+            // Spawn workers up to current target
+            let mut current_active = *active_workers.lock().unwrap();
+            while current_active < current_target_workers {
+                let pending = pending_chunks.clone();
+                let chunk = {
+                    let mut p = pending.lock().unwrap();
+                    if p.is_empty() { break; }
+                    p.remove(0)
+                };
+
+                let active_ptr = active_workers.clone();
+                let progress = self.progress.clone();
+                let on_progress_cb = on_progress_arc.clone();
+                let db_path_clone = self.db_path.clone();
+                let id_clone = self.config.id.clone();
+                let client = self.client.clone();
+                let url = url.clone();
+                let filepath = self.config.filepath.clone();
+                let tx = worker_tx.clone();
+                let start_time_clone = start_time;
+                let initial_downloaded_clone = initial_downloaded_at_start;
+                let error_ptr = error_occurred.clone();
+                let throttled_ptr = throttled.clone();
+
+                *active_workers.lock().unwrap() += 1;
+                current_active += 1;
+
+                tokio::spawn(async move {
+                    let res = async {
+                        let mut chunk_file = std::fs::OpenOptions::new().write(true).open(&filepath)?;
+                        let current_start = chunk.start + chunk.downloaded;
+                        chunk_file.seek(SeekFrom::Start(current_start))?;
+
+                        let range = format!("bytes={}-{}", current_start, chunk.end);
+                        let response = client.get(url).header("Range", range).send().await?;
+
+                        if response.status() == 429 || response.status() == 503 {
+                            *throttled_ptr.lock().unwrap() = true;
+                            return Err(DownloadError::Network("Server throttling".to_string()));
+                        }
+
+                        let mut stream = response.bytes_stream();
+                        let mut local_downloaded = chunk.downloaded;
+                        let mut last_db_update = std::time::Instant::now();
+
+                        while let Some(item) = stream.next().await {
+                            let bytes = item.map_err(|e| DownloadError::Network(e.to_string()))?;
+                            chunk_file.write_all(&bytes)?;
+                            let len = bytes.len() as u64;
+                            local_downloaded += len;
+
+                            {
+                                let mut p = progress.lock().unwrap();
+                                p.downloaded += len;
+                                p.connections = *active_ptr.lock().unwrap();
+                                
+                                let elapsed = start_time_clone.elapsed().as_secs_f64();
+                                if elapsed > 0.1 {
+                                    let bytes_since_start = p.downloaded - initial_downloaded_clone;
+                                    p.speed = (bytes_since_start as f64 / elapsed) as u64;
+                                    if p.speed > 0 {
+                                        p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
+                                    }
+                                }
+                                (on_progress_cb)(p.clone());
+                            }
+
+                            if last_db_update.elapsed().as_secs() >= 1 {
+                                if let Some(ref db) = db_path_clone {
+                                    crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
+                                }
+                                last_db_update = std::time::Instant::now();
+                            }
+                        }
+
+                        if let Some(ref db) = db_path_clone {
+                            crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
+                        }
+                        Ok(())
+                    }.await;
+
+                    if let Err(e) = res {
+                        *error_ptr.lock().unwrap() = Some(e);
+                    }
+
+                    *active_ptr.lock().unwrap() -= 1;
+                    let _ = tx.send(()).await;
+                });
+            }
+
+            // Scaling logic: check every 2 seconds
+            let _current_speed = { self.progress.lock().unwrap().speed };
+            if start_time.elapsed().as_secs() % 2 == 0 && current_active < max_workers {
+                if !*throttled.lock().unwrap() {
+                    current_target_workers = (current_target_workers + 1).min(max_workers);
+                }
+            }
+
+            // Wait for a worker to finish or a timeout for scaling
+            if current_active == 0 && pending_chunks.lock().unwrap().is_empty() {
+                break;
+            }
+
+            tokio::select! {
+                _ = worker_rx.recv() => {},
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {},
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn download_single_connection<F>(&self, on_progress: F) -> Result<(), DownloadError>
+    where
+        F: Fn(DownloadProgress) + Send + Sync + 'static,
+    {
+        let response = self.client.get(&self.config.url).send().await?;
+        let total_size = response.content_length().unwrap_or(0);
+
+        let mut file = std::fs::File::create(&self.config.filepath)?;
+        let mut stream = response.bytes_stream();
+
+        while let Some(item) = stream.next().await {
+            let chunk = item.map_err(|e| DownloadError::Network(e.to_string()))?;
+            file.write_all(&chunk)?;
+
+            let mut p = self.progress.lock().unwrap();
+            p.downloaded += chunk.len() as u64;
+            p.total = total_size;
+            (on_progress)(p.clone());
+        }
+
+        Ok(())
+    }
+}
+
+/// Check if server supports range requests
+pub async fn check_range_support(client: &Client, url: &str) -> Result<(bool, u64), DownloadError> {
+    let response = client.head(url).send().await.map_err(|e| DownloadError::Network(e.to_string()))?;
+
+    let supports_range = response
+        .headers()
+        .get("accept-ranges")
+        .map(|v| v.to_str().unwrap_or("") == "bytes")
+        .unwrap_or(false) || response.headers().contains_key("content-range");
+
+    let content_length = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    Ok((supports_range, content_length))
+}
+
+/// Extract filename from URL or Content-Disposition header
+pub fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> String {
+    // Try Content-Disposition header first
+    if let Some(cd) = headers.get("content-disposition") {
+        if let Ok(cd_str) = cd.to_str() {
+            if let Some(pos) = cd_str.find("filename=") {
+                let filename = &cd_str[pos + 9..];
+                let filename = filename.trim_matches('"').trim_matches('\'');
+                if !filename.is_empty() {
+                    return filename.to_string();
+                }
+            }
+        }
+    }
+
+    // Fall back to URL path
+    url.rsplit('/')
+        .next()
+        .and_then(|s| s.split('?').next())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "download".to_string())
+}
