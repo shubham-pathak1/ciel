@@ -2,10 +2,9 @@
 
 > **Status**: 🚧 In Development (Alpha)
 
-**Ciel** is a high-performance download manager designed with a strict "Monochrome Minimalist" aesthetic. Built for users who value speed, privacy, and distraction-free software.
+**Ciel** is a high-performance download manager made using tauri. Built for users who value speed, privacy, and distraction-free software.
 
 ## Philosophy
-- **Visuals**: "Slate & Onyx" palette. No glassmorphism, no neon, no clutter.
 - **Performance**: Native Rust backend via Tauri.
 - **Privacy**: Zero telemetry. All data stays local.
 
