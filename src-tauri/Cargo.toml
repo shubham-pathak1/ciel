@@ -28,6 +28,7 @@ directories = "5"
 librqbit = "8.1.1"
 url = "2"
 sha2 = "0.10"
+percent-encoding = "2"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.5"

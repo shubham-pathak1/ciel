@@ -97,6 +97,45 @@ pub async fn add_download(
         .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(8);
     
+    let mut filename = filename;
+    
+    // Check if current filename is "suspicious" (no extension, generic, or looks like a hash)
+    let has_ext = filename.contains('.');
+    let is_generic = filename == "download" || filename == "download_file" || filename.is_empty();
+    let looks_like_hash = filename.len() > 15 && !filename.contains(' ') && !has_ext;
+
+    if (is_generic || looks_like_hash || !has_ext) && url.starts_with("http") {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .build()
+            .unwrap_or_default();
+            
+        let mut found_name = None;
+        
+        // Try HEAD first
+        if let Ok(res) = client.head(&url).send().await {
+            let name = crate::downloader::extract_filename(&url, res.headers());
+            if name != "download" && name != "download_file" {
+                found_name = Some(name);
+            }
+        }
+        
+        // If HEAD failed or didn't give a good name, try GET with a tiny range
+        if found_name.is_none() {
+            if let Ok(res) = client.get(&url).header("Range", "bytes=0-0").send().await {
+                let name = crate::downloader::extract_filename(&url, res.headers());
+                if name != "download" && name != "download_file" {
+                    found_name = Some(name);
+                }
+            }
+        }
+        
+        if let Some(name) = found_name {
+            filename = name;
+        }
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
         id: id.clone(),
@@ -133,6 +172,18 @@ pub async fn add_torrent(
     filename: String,
     filepath: String,
 ) -> Result<Download, String> {
+    let mut filename = filename;
+    let is_magnet = url.starts_with("magnet:");
+    
+    // Attempt to extract name from magnet link "dn" parameter
+    if is_magnet {
+        if let Ok(parsed_url) = url::Url::parse(&url) {
+            if let Some((_, name)) = parsed_url.query_pairs().find(|(k, _)| k == "dn") {
+                filename = name.to_string();
+            }
+        }
+    }
+
     let resolved_path = resolve_download_path(&db_state.path, &filepath);
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -150,13 +201,13 @@ pub async fn add_torrent(
         created_at: chrono::Utc::now().to_rfc3339(),
         completed_at: None,
         error_message: None,
-        info_hash: None, // We'll update this once rqbit gives us the infohash if needed
+        info_hash: None, 
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
     db::log_event(&db_state.path, &download.id, "created", Some("Torrent download initiated")).ok();
 
-    torrent_manager.add_magnet(app, id, url, resolved_path).await?;
+    torrent_manager.add_magnet(app, id, url, resolved_path, db_state.path.clone()).await?;
 
     Ok(download)
 }

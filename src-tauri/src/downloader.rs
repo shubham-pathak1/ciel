@@ -452,6 +452,8 @@ impl Downloader {
 
         let mut file = std::fs::File::create(&self.config.filepath)?;
         let mut stream = response.bytes_stream();
+        let start_time = std::time::Instant::now();
+        let initial_downloaded = { self.progress.lock().unwrap().downloaded };
 
         while let Some(item) = stream.next().await {
             let chunk = item.map_err(|e| DownloadError::Network(e.to_string()))?;
@@ -460,6 +462,17 @@ impl Downloader {
             let mut p = self.progress.lock().unwrap();
             p.downloaded += chunk.len() as u64;
             p.total = total_size;
+            p.connections = 1;
+            
+            let elapsed = start_time.elapsed().as_secs_f64();
+            if elapsed > 0.1 {
+                let bytes_since_start = p.downloaded - initial_downloaded;
+                p.speed = (bytes_since_start as f64 / elapsed) as u64;
+                if p.speed > 0 {
+                    p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
+                }
+            }
+            
             (on_progress)(p.clone());
         }
 
@@ -489,24 +502,56 @@ pub async fn check_range_support(client: &Client, url: &str) -> Result<(bool, u6
 
 /// Extract filename from URL or Content-Disposition header
 pub fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> String {
-    // Try Content-Disposition header first
+    // 1. Try Content-Disposition header first
     if let Some(cd) = headers.get("content-disposition") {
         if let Ok(cd_str) = cd.to_str() {
+            // Try filename*= (UTF-8 encoded)
+            if let Some(pos) = cd_str.find("filename*=") {
+                let parts = &cd_str[pos + 10..];
+                let filename = parts.split(';').next().unwrap_or("").trim();
+                // Format is usually UTF-8''filename.ext
+                if let Some(last_quote) = filename.rfind('\'') {
+                    let actual_name = &filename[last_quote + 1..];
+                    if let Ok(decoded) = percent_encoding::percent_decode(actual_name.as_bytes()).decode_utf8() {
+                        return sanitize_filename(&decoded);
+                    }
+                }
+            }
+            
+            // Try standard filename=
             if let Some(pos) = cd_str.find("filename=") {
-                let filename = &cd_str[pos + 9..];
+                let parts = &cd_str[pos + 9..];
+                let filename = parts.split(';').next().unwrap_or("").trim();
                 let filename = filename.trim_matches('"').trim_matches('\'');
                 if !filename.is_empty() {
-                    return filename.to_string();
+                    return sanitize_filename(filename);
                 }
             }
         }
     }
 
-    // Fall back to URL path
-    url.rsplit('/')
+    // 2. Fall back to URL path
+    let filename = url.rsplit('/')
         .next()
         .and_then(|s| s.split('?').next())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "download".to_string())
+        .map(|s| {
+            percent_encoding::percent_decode(s.as_bytes())
+                .decode_utf8()
+                .map(|decoded| decoded.into_owned())
+                .unwrap_or(s)
+        })
+        .unwrap_or_else(|| "download".to_string());
+        
+    sanitize_filename(&filename)
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let sanitized = name.replace(|c: char| c.is_control() || "<>:\"/\\|?*".contains(c), "_");
+    if sanitized.is_empty() {
+        "download".to_string()
+    } else {
+        sanitized
+    }
 }

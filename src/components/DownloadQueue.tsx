@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, Wifi, ArrowDown, Clock } from "lucide-react";
+import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import clsx from "clsx";
@@ -94,10 +94,17 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
             );
         });
 
+        const unlistenName = listen<{ id: string; filename: string }>("download-name-updated", (event) => {
+            setDownloads((prev) => {
+                return prev.map(d => d.id === event.payload.id ? { ...d, filename: event.payload.filename } : d);
+            });
+        });
+
         return () => {
             unlistenProgress.then((u) => u());
             unlistenCompleted.then((u) => u());
             unlistenError.then((u) => u());
+            unlistenName.then((u) => u());
         };
     }, []);
 
@@ -321,8 +328,17 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                                         <span>{formatSpeed(download.speed)}</span>
                                     </div>
                                     <div className="flex items-center gap-1 text-text-tertiary">
-                                        <Wifi size={10} />
-                                        <span>{download.connections}</span>
+                                        {download.protocol === 'torrent' ? (
+                                            <>
+                                                <Users size={10} />
+                                                <span>{download.connections} Peers</span>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Wifi size={10} />
+                                                <span>{download.connections} Conns</span>
+                                            </>
+                                        )}
                                     </div>
                                 </>
                             )}
@@ -336,7 +352,11 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                                 </div>
                             )}
                             <span className={clsx("font-medium", getStatusColor())}>
-                                {download.status === 'completed' ? 'Done' : `${visualProgress.toFixed(1)}%`}
+                                {download.status === 'completed'
+                                    ? 'Done'
+                                    : (download.protocol === 'torrent' && download.size === 0)
+                                        ? 'Initializing...'
+                                        : `${visualProgress.toFixed(1)}%`}
                             </span>
                         </div>
                     </div>
