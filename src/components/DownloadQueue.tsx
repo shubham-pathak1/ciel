@@ -19,6 +19,7 @@ interface DownloadItem {
     connections: number;
     protocol: "http" | "torrent";
     status: "downloading" | "paused" | "completed" | "queued" | "error";
+    filepath: string;
 }
 
 interface ProgressPayload {
@@ -278,7 +279,9 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                                 {download.status === "downloading" ? <Pause size={14} /> : <Play size={14} />}
                             </button>
                             <button
-                                onClick={() => { }} // Open folder logic
+                                onClick={() => {
+                                    invoke("show_in_folder", { path: download.filepath });
+                                }}
                                 className="btn-ghost p-1.5"
                             >
                                 <FolderOpen size={14} />

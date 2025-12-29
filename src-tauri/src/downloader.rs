@@ -109,6 +109,7 @@ pub struct Downloader {
     config: DownloadConfig,
     progress: Arc<Mutex<DownloadProgress>>,
     db_path: Option<String>,
+    cancel_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Downloader {
@@ -132,11 +133,17 @@ impl Downloader {
             config,
             progress,
             db_path: None,
+            cancel_signal: None,
         }
     }
 
     pub fn with_db(mut self, db_path: String) -> Self {
         self.db_path = Some(db_path);
+        self
+    }
+
+    pub fn with_cancel_signal(mut self, signal: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel_signal = Some(signal);
         self
     }
 
@@ -284,12 +291,128 @@ impl Downloader {
                 *active_workers.lock().unwrap() += 1;
                 current_active += 1;
 
+                let url = url.clone();
+                let filepath = filepath.clone();
+                let mut chunk = chunk.clone();
+                let client = client.clone();
+                let progress = progress.clone();
+                let active_ptr = active_ptr.clone();
+                let error_ptr = error_ptr.clone();
+                let throttled_ptr = throttled_ptr.clone();
+                let tx = tx.clone();
+                let db_path_clone = db_path_clone.clone();
+                let id_clone = id_clone.clone();
+                let on_progress_cb = on_progress_cb.clone();
+                let cancel_signal = self.cancel_signal.clone();
+                
                 tokio::spawn(async move {
+                    let mut attempts = 0;
+                    let max_retries = 3;
+                    let mut final_error = None;
+                    
+                    loop {
+                        // Check cancellation
+                        if let Some(sig) = &cancel_signal {
+                            if sig.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
                         }
-                        Ok(())
-                    }.await;
 
-                    if let Err(e) = res {
+                        if attempts >= max_retries {
+                            break;
+                        }
+
+                        let res = async {
+                            let mut chunk_file = std::fs::OpenOptions::new().write(true).open(&filepath)?;
+                            let current_start = chunk.start + chunk.downloaded;
+                            chunk_file.seek(SeekFrom::Start(current_start))?;
+
+                            let range = format!("bytes={}-{}", current_start, chunk.end);
+                            let response = client.get(url.clone()).header("Range", range).send().await?;
+
+                            if response.status() == 429 || response.status() == 503 {
+                                *throttled_ptr.lock().unwrap() = true;
+                                return Err(DownloadError::Network("Server throttling".to_string()));
+                            }
+
+                            if !response.status().is_success() {
+                                return Err(DownloadError::Network(format!("HTTP {}", response.status())));
+                            }
+
+                            let mut stream = response.bytes_stream();
+                            let mut local_downloaded = chunk.downloaded;
+                            let mut last_db_update = std::time::Instant::now();
+
+                            while let Some(item) = stream.next().await {
+                                // Check cancellation in stream
+                                if let Some(sig) = &cancel_signal {
+                                    if sig.load(std::sync::atomic::Ordering::Relaxed) {
+                                        return Ok(()); // Exit gracefully
+                                    }
+                                }
+
+                                let bytes = item.map_err(|e| DownloadError::Network(e.to_string()))?;
+                                chunk_file.write_all(&bytes)?;
+                                let len = bytes.len() as u64;
+                                local_downloaded += len;
+                                chunk.downloaded = local_downloaded;
+
+                                {
+                                    let mut p = progress.lock().unwrap();
+                                    p.downloaded += len;
+                                    p.connections = *active_ptr.lock().unwrap();
+                                    
+                                    let elapsed = start_time_clone.elapsed().as_secs_f64();
+                                    if elapsed > 0.1 {
+                                        let bytes_since_start = p.downloaded - initial_downloaded_clone;
+                                        p.speed = (bytes_since_start as f64 / elapsed) as u64;
+                                        if p.speed > 0 {
+                                            p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
+                                        }
+                                    }
+                                    (on_progress_cb)(p.clone());
+                                }
+
+                                if last_db_update.elapsed().as_secs() >= 1 {
+                                    let (total_downloaded, current_speed) = {
+                                        let p = progress.lock().unwrap();
+                                        (p.downloaded as i64, p.speed as i64)
+                                    };
+
+                                    if let Some(ref db) = db_path_clone {
+                                        crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
+                                        crate::db::update_download_progress(db, &id_clone, total_downloaded, current_speed).ok();
+                                    }
+                                    last_db_update = std::time::Instant::now();
+                                }
+                            }
+                            
+                            if let Some(ref db) = db_path_clone {
+                                crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
+                            }
+                            Ok::<(), DownloadError>(())
+                        }.await;
+
+                        match res {
+                            Ok(_) => {
+                                final_error = None;
+                                break;
+                            }
+                            Err(e) => {
+                                // Check cancellation before retry
+                                if let Some(sig) = &cancel_signal {
+                                    if sig.load(std::sync::atomic::Ordering::Relaxed) {
+                                        break;
+                                    }
+                                }
+                                final_error = Some(e);
+                                attempts += 1;
+                                tokio::time::sleep(std::time::Duration::from_millis(1000 * attempts as u64)).await;
+                            }
+                        }
+                    }
+
+                    if let Some(e) = final_error {
                         *error_ptr.lock().unwrap() = Some(e);
                     }
 

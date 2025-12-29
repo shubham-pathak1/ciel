@@ -160,8 +160,10 @@ async fn start_download_task(
     let filepath = download.filepath.clone();
     let connections = download.connections as u8;
 
-    // Create cancellation channel
+    // Create cancellation channel and signal
     let (tx, mut rx) = mpsc::channel(1);
+    let is_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    
     manager.add_active(id.clone(), tx).await;
 
     // Spawn download in background
@@ -175,7 +177,10 @@ async fn start_download_task(
             speed_limit: 0,
         };
 
-        let downloader = Downloader::new(config).with_db(db_path.clone());
+        let downloader = Downloader::new(config)
+            .with_db(db_path.clone())
+            .with_cancel_signal(is_cancelled.clone()); // Pass signal
+
         let id_inner = id.clone();
         let db_path_inner = db_path.clone();
         let app_clone = app.clone();
@@ -199,6 +204,8 @@ async fn start_download_task(
                 }
             }
             _ = rx.recv() => {
+                // Signal cancellation to workers
+                is_cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = db::update_download_status(&db_path_inner, &id_inner, DownloadStatus::Paused);
                 let _ = app.emit("download-paused", id_inner.clone());
             }
@@ -296,6 +303,35 @@ pub fn get_settings(db_state: State<DbState>) -> Result<HashMap<String, String>,
 #[tauri::command]
 pub fn update_setting(db_state: State<DbState>, key: String, value: String) -> Result<(), String> {
     db::set_setting(&db_state.path, &key, &value).map_err(|e| e.to_string())
+}
+
+/// Show file in folder
+#[tauri::command]
+pub fn show_in_folder(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .args(["/select,", &path]) // Comma is important
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Try xdg-open (might just open folder, not select)
+        // Or implement specific file managers like nautilus, dolphin
+        std::process::Command::new("xdg-open")
+            .arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/")))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 impl Clone for DownloadManager {
