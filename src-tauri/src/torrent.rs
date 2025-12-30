@@ -25,7 +25,7 @@ impl TorrentManager {
         }
     }
 
-    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, _output_folder: String, _db_path: String) -> Result<(), String> {
+    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, _output_folder: String, db_path: String) -> Result<(), String> {
         let response = self.session.add_torrent(AddTorrent::from_url(magnet), None).await
             .map_err(|e| e.to_string())?;
         
@@ -74,8 +74,8 @@ impl TorrentManager {
 
                 // 1. Update Filename & Metadata discovery
                 if !name_updated && stats.total_bytes > 0 {
-                    if let Some(info) = handle.shared().info() {
-                        let real_name = info.name.clone();
+                    let name_result = handle.with_metadata(|m| m.name.clone());
+                    if let Ok(real_name) = name_result {
                         let total_size = stats.total_bytes;
                         
                         // Update DB size
@@ -85,11 +85,11 @@ impl TorrentManager {
                         let db_p = db_path_clone.clone();
                         let id_p = id_clone.clone();
                         let name_p = real_name.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
+                        tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = rusqlite::Connection::open(db_p) {
                                 let _ = conn.execute("UPDATE downloads SET filename = ?1 WHERE id = ?2", (name_p, id_p));
                             }
-                        }).await;
+                        });
 
                         let _ = app.emit("download-name-updated", serde_json::json!({
                             "id": id_clone,

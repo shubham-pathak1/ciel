@@ -152,6 +152,7 @@ export const History: React.FC = () => {
                                         {/* Actions */}
                                         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-all translate-x-2 group-hover:translate-x-0 self-center">
                                             <button
+                                                onClick={() => invoke("show_in_folder", { path: item.filepath })}
                                                 title="Open Location"
                                                 className="p-2 rounded-lg hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all"
                                             >

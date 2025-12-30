@@ -273,9 +273,16 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                 <div className="flex-1 min-w-0 flex flex-col gap-1.5">
                     {/* Header Row */}
                     <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-medium text-text-primary truncate pr-4" title={download.filename}>
-                            {download.filename}
-                        </h3>
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                            <h3 className="text-sm font-medium text-text-primary truncate" title={download.filename}>
+                                {download.filename}
+                            </h3>
+                            {download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued') && (download.status === 'downloading' || download.status === 'queued') && (
+                                <span className="bg-amber-500/10 text-amber-500 text-[10px] px-1.5 py-0.5 rounded border border-amber-500/20 font-bold tracking-wider animate-pulse whitespace-nowrap">
+                                    INITIALIZING
+                                </span>
+                            )}
+                        </div>
 
                         {/* Actions */}
                         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
@@ -304,12 +311,12 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
 
                     {/* Progress Bar Container */}
                     <div className="w-full h-1 bg-brand-tertiary rounded-full overflow-hidden relative">
-                        {download.protocol === 'torrent' && download.size === 0 && download.status === 'downloading' ? (
+                        {download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued') && (download.status === 'downloading' || download.status === 'queued') ? (
                             <div className="absolute inset-0 bg-text-primary/30 animate-pulse" />
                         ) : (
                             <div
                                 className={clsx(
-                                    "h-full rounded-full transition-all duration-500",
+                                    "h-full rounded-full transition-[width] duration-50 ease-linear",
                                     download.status === 'completed' ? 'bg-status-success' :
                                         download.status === 'error' ? 'bg-status-error' : 'bg-text-primary'
                                 )}
@@ -322,7 +329,13 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                     <div className="flex items-center justify-between text-xs text-text-secondary mt-0.5">
                         <div className="flex items-center gap-3">
                             <span>
-                                {formatSize(download.downloaded)} <span className="text-text-tertiary">/</span> {formatSize(download.size)}
+                                {download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued') && (download.status === 'downloading' || download.status === 'queued') ? (
+                                    <span className="text-amber-500 animate-pulse">Fetching metadata...</span>
+                                ) : (
+                                    <>
+                                        {formatSize(download.downloaded)} <span className="text-text-tertiary">/</span> {formatSize(download.size)}
+                                    </>
+                                )}
                             </span>
 
                             {download.status === 'downloading' && (
@@ -358,7 +371,7 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                             <span className={clsx("font-medium", getStatusColor())}>
                                 {download.status === 'completed'
                                     ? 'Done'
-                                    : (download.protocol === 'torrent' && download.size === 0)
+                                    : (download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued'))
                                         ? 'Initializing...'
                                         : `${visualProgress.toFixed(1)}%`}
                             </span>

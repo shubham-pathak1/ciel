@@ -110,6 +110,7 @@ pub struct Downloader {
     progress: Arc<Mutex<DownloadProgress>>,
     db_path: Option<String>,
     cancel_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
+    last_emit: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Downloader {
@@ -134,12 +135,17 @@ impl Downloader {
             progress,
             db_path: None,
             cancel_signal: None,
+            last_emit: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
     pub fn with_db(mut self, db_path: String) -> Self {
         self.db_path = Some(db_path);
         self
+    }
+
+    pub fn get_progress(&self) -> Arc<Mutex<DownloadProgress>> {
+        self.progress.clone()
     }
 
     pub fn with_cancel_signal(mut self, signal: Arc<std::sync::atomic::AtomicBool>) -> Self {
@@ -304,6 +310,7 @@ impl Downloader {
                 let id_clone = id_clone.clone();
                 let on_progress_cb = on_progress_cb.clone();
                 let cancel_signal = self.cancel_signal.clone();
+                let last_emit_clone = self.last_emit.clone();
                 
                 tokio::spawn(async move {
                     let mut attempts = 0;
@@ -370,7 +377,15 @@ impl Downloader {
                                             p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
                                         }
                                     }
-                                    (on_progress_cb)(p.clone());
+
+                                    // Throttle progress emission to 50ms
+                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                                    let last = last_emit_clone.load(std::sync::atomic::Ordering::Relaxed);
+                                    
+                                    if now - last > 50 {
+                                        last_emit_clone.store(now, std::sync::atomic::Ordering::Relaxed);
+                                        (on_progress_cb)(p.clone());
+                                    }
                                 }
 
                                 if last_db_update.elapsed().as_secs() >= 1 {
@@ -455,6 +470,7 @@ impl Downloader {
         let start_time = std::time::Instant::now();
         let initial_downloaded = { self.progress.lock().unwrap().downloaded };
 
+        let last_emit_clone = self.last_emit.clone();
         while let Some(item) = stream.next().await {
             let chunk = item.map_err(|e| DownloadError::Network(e.to_string()))?;
             file.write_all(&chunk)?;
@@ -473,7 +489,14 @@ impl Downloader {
                 }
             }
             
-            (on_progress)(p.clone());
+            // Throttle progress emission to 50ms
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            let last = last_emit_clone.load(std::sync::atomic::Ordering::Relaxed);
+            
+            if now - last > 50 {
+                last_emit_clone.store(now, std::sync::atomic::Ordering::Relaxed);
+                (on_progress)(p.clone());
+            }
         }
 
         Ok(())

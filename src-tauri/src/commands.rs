@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-use directories::UserDirs;
+
 
 /// Manager for active downloads
 pub struct DownloadManager {
@@ -43,8 +43,8 @@ impl DownloadManager {
 
 /// Helper to resolve authentic filepath
 fn resolve_download_path(db_path: &str, provided_path: &str) -> String {
-    let path = Path::new(provided_path);
-    if path.is_absolute() {
+    let p = Path::new(provided_path);
+    if p.is_absolute() {
         return provided_path.to_string();
     }
 
@@ -58,18 +58,28 @@ fn resolve_download_path(db_path: &str, provided_path: &str) -> String {
         if path.is_absolute() {
             path
         } else {
-            // Resolve relative path against current directory or executable location
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
         }
     } else {
-        UserDirs::new()
-            .and_then(|dirs| dirs.download_dir().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        // Fallback to project's downloads folder instead of system download dir for better consistency
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("downloads")
     };
 
+    // Ensure base directory exists
+    let _ = std::fs::create_dir_all(&base_dir);
+
     // If provided path is simply a filename or relative like ./file
-    let file_name = path.file_name().unwrap_or_default();
-    base_dir.join(file_name).to_string_lossy().to_string()
+    let file_name = p.file_name().unwrap_or_default();
+    let final_path = base_dir.join(file_name);
+    
+    // Ensure the path is absolute for external tool reliability (Explorer, etc)
+    let absolute_path = if final_path.is_absolute() {
+        final_path
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(final_path)
+    };
+    
+    absolute_path.to_string_lossy().to_string()
 }
 
 /// Get all downloads
@@ -86,9 +96,8 @@ pub async fn add_download(
     manager: State<'_, DownloadManager>,
     url: String,
     filename: String,
-    filepath: String,
+    _filepath: String,
 ) -> Result<Download, String> {
-    let resolved_path = resolve_download_path(&db_state.path, &filepath);
 
     // Get max connections from settings
     let max_connections = db::get_setting(&db_state.path, "max_connections")
@@ -136,12 +145,15 @@ pub async fn add_download(
         }
     }
 
+    // Finalize resolved path using the potentially updated filename
+    let final_resolved_path = resolve_download_path(&db_state.path, &filename);
+
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
         id: id.clone(),
         url: url.clone(),
         filename,
-        filepath: resolved_path,
+        filepath: final_resolved_path,
         size: 0,
         downloaded: 0,
         status: DownloadStatus::Downloading,
@@ -169,10 +181,9 @@ pub async fn add_torrent(
     db_state: State<'_, DbState>,
     torrent_manager: State<'_, TorrentManager>,
     url: String, // Magnet link or local file path
-    filename: String,
-    filepath: String,
+    mut filename: String,
+    _filepath: String,
 ) -> Result<Download, String> {
-    let mut filename = filename;
     let is_magnet = url.starts_with("magnet:");
     
     // Attempt to extract name from magnet link "dn" parameter
@@ -184,7 +195,7 @@ pub async fn add_torrent(
         }
     }
 
-    let resolved_path = resolve_download_path(&db_state.path, &filepath);
+    let resolved_path = resolve_download_path(&db_state.path, &filename);
 
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
@@ -194,7 +205,7 @@ pub async fn add_torrent(
         filepath: resolved_path.clone(),
         size: 0,
         downloaded: 0,
-        status: DownloadStatus::Downloading,
+        status: DownloadStatus::Queued,
         protocol: DownloadProtocol::Torrent,
         speed: 0,
         connections: 0,
@@ -258,6 +269,18 @@ async fn start_download_task(
             res = download_task => {
                 match res {
                     Ok(_) => {
+                        // Get final stats from downloader if possible to ensure DB is accurate
+                        let progress = downloader.get_progress();
+                        let (final_downloaded, final_total) = {
+                            let p = progress.lock().unwrap();
+                            (p.downloaded, p.total)
+                        };
+                        
+                        let _ = db::update_download_progress(&db_path_inner, &id_inner, final_downloaded as i64, 0);
+                        if final_total > 0 {
+                            let _ = db::update_download_size(&db_path_inner, &id_inner, final_total as i64);
+                        }
+                        
                         let _ = db::update_download_status(&db_path_inner, &id_inner, DownloadStatus::Completed);
                         let _ = app.emit("download-completed", id_inner.clone());
                     }
@@ -383,27 +406,62 @@ pub fn update_setting(db_state: State<DbState>, key: String, value: String) -> R
 pub fn show_in_folder(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .args(["/select,", &path]) // Comma is important
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        let path_norm = path.replace("/", "\\");
+        let p = Path::new(&path_norm);
+        println!("Opening folder for: {}", path_norm);
+        
+        if p.exists() {
+            // If file exists, try to select it
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(format!("/select,\"{}\"", path_norm))
+                .spawn();
+        } else {
+            // If the specific file doesn't exist, try opening its parent directory
+            if let Some(parent) = p.parent() {
+                println!("File not found, opening parent: {:?}", parent);
+                let _ = std::process::Command::new("explorer.exe")
+                    .arg(parent)
+                    .spawn();
+            } else {
+                // Last ditch effort: open current dir if parent is somehow missing
+                let _ = std::process::Command::new("explorer.exe")
+                    .arg(".")
+                    .spawn();
+            }
+        }
     }
+    
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .args(["-R", &path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        let p = Path::new(&path);
+        if p.exists() {
+            std::process::Command::new("open")
+                .args(["-R", &path])
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        } else if let Some(parent) = p.parent() {
+            std::process::Command::new("open")
+                .arg(parent)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
     }
+    
     #[cfg(target_os = "linux")]
     {
-        // Try xdg-open (might just open folder, not select)
-        // Or implement specific file managers like nautilus, dolphin
+        let p = Path::new(&path);
+        let folder = if p.is_dir() {
+            p
+        } else {
+            p.parent().unwrap_or_else(|| Path::new("/"))
+        };
+        
         std::process::Command::new("xdg-open")
-            .arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/")))
+            .arg(folder)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
+    
     Ok(())
 }
 
