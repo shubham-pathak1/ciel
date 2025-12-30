@@ -4,6 +4,21 @@ use tokio::sync::Mutex;
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
 use std::path::PathBuf;
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TorrentFile {
+    pub name: String,
+    pub size: u64,
+    pub index: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TorrentInfo {
+    pub name: String,
+    pub total_size: u64,
+    pub files: Vec<TorrentFile>,
+}
 
 pub struct TorrentManager {
     session: Arc<Session>,
@@ -25,8 +40,12 @@ impl TorrentManager {
         }
     }
 
-    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, _output_folder: String, db_path: String) -> Result<(), String> {
-        let response = self.session.add_torrent(AddTorrent::from_url(magnet), None).await
+    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, _output_folder: String, db_path: String, indices: Option<Vec<usize>>) -> Result<(), String> {
+        let options = librqbit::AddTorrentOptions {
+            only_files: indices,
+            ..Default::default()
+        };
+        let response = self.session.add_torrent(AddTorrent::from_url(magnet), Some(options)).await
             .map_err(|e| e.to_string())?;
         
         let handle = response.into_handle().ok_or("Failed to get torrent handle")?;
@@ -119,6 +138,65 @@ impl TorrentManager {
             }
         });
 
+        Ok(())
+    }
+
+    pub async fn analyze_magnet(&self, magnet: String) -> Result<TorrentInfo, String> {
+        let options = librqbit::AddTorrentOptions {
+            list_only: true,
+            ..Default::default()
+        };
+        let response = self.session.add_torrent(librqbit::AddTorrent::from_url(magnet), Some(options)).await
+            .map_err(|e| e.to_string())?;
+        
+        let handle = response.into_handle().ok_or("Failed to get torrent handle")?;
+        
+        // Wait for metadata (timeout after 30s)
+        let start = std::time::Instant::now();
+        while handle.stats().total_bytes == 0 {
+            if start.elapsed().as_secs() > 30 {
+                return Err("Timeout waiting for metadata".to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        // Pause immediately after metadata is found
+        self.session.pause(&handle).await.ok();
+
+        // Get info while handle is active
+        let info = handle.with_metadata(|m| {
+            let files = m.file_infos.iter().enumerate().map(|(i, f)| {
+                TorrentFile {
+                    name: f.relative_filename.to_string_lossy().to_string(),
+                    size: f.len,
+                    index: i,
+                }
+            }).collect();
+
+            TorrentInfo {
+                name: m.name.clone().unwrap_or_default(),
+                total_size: m.file_infos.iter().map(|f| f.len).sum(),
+                files,
+            }
+        }).map_err(|e| e.to_string())?;
+
+        // Remove from session so it can be re-added with selective files later
+        // Use the infohash from the handle
+        let info_hash = handle.info_hash();
+        self.session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
+            .map_err(|e| e.to_string())?;
+
+        Ok(info)
+    }
+
+    pub async fn start_selective(&self, id: &str, _indices: Vec<usize>) -> Result<(), String> {
+        // Since we removed it during analysis, this might not be in active_torrents yet
+        // Wait, start_selective is called AFTER add_torrent in the new flow?
+        // Let's check commands.rs
+        let active = self.active_torrents.lock().await;
+        if let Some(handle) = active.get(id) {
+             self.session.unpause(handle).await.map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 

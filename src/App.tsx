@@ -31,7 +31,7 @@ function App() {
                 <Sidebar currentView={currentView} onViewChange={setCurrentView} />
 
                 <main className="flex-1 bg-brand-primary flex flex-col min-w-0">
-                    <div className="flex-1 overflow-auto p-8 relative z-10 scrollbar-hide">
+                    <div className="flex-1 overflow-auto p-8 scrollbar-hide">
                         {renderContent()}
                     </div>
                 </main>

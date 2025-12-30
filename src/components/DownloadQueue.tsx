@@ -1,8 +1,22 @@
 import { useState, useEffect } from "react";
-import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi } from "lucide-react";
+import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Plus, AlertCircle, Database as DatabaseIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import clsx from "clsx";
+import { ModalPortal } from "./ModalPortal";
+import { TorrentFileSelector } from "./TorrentFileSelector";
+
+interface TorrentFile {
+    name: string;
+    size: number;
+    index: number;
+}
+
+interface TorrentInfo {
+    name: string;
+    total_size: number;
+    files: TorrentFile[];
+}
 
 interface DownloadQueueProps {
     filter: "downloads" | "active" | "completed" | "settings";
@@ -30,6 +44,28 @@ interface ProgressPayload {
     eta: number;
     connections: number;
 }
+
+const formatSize = (bytes: number) => {
+    if (bytes === 0) return '0 B';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+};
+
+const formatSpeed = (bytesPerSec: number) => {
+    if (bytesPerSec === 0) return "0 B/s";
+    if (bytesPerSec < 1024) return `${bytesPerSec} B/s`;
+    if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+    return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
+};
+
+const formatEta = (seconds: number) => {
+    if (seconds <= 0 || !isFinite(seconds)) return "--";
+    if (seconds < 60) return `${Math.floor(seconds)}s`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+};
 
 export function DownloadQueue({ filter }: DownloadQueueProps) {
     const [downloads, setDownloads] = useState<DownloadItem[]>([]);
@@ -211,27 +247,6 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
         setVisualProgress(progress);
     }, [progress]);
 
-    const formatSize = (bytes: number) => {
-        if (bytes < 1024) return `${bytes} B`;
-        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-        if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-        return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-    };
-
-    const formatSpeed = (bytesPerSec: number) => {
-        if (bytesPerSec === 0) return "0 B/s";
-        if (bytesPerSec < 1024) return `${bytesPerSec} B/s`;
-        if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
-        return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
-    };
-
-    const formatEta = (seconds: number) => {
-        if (seconds === 0 || !isFinite(seconds)) return "--";
-        if (seconds < 60) return `${seconds}s`;
-        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-    };
-
     const handlePauseResume = async (e: React.MouseEvent) => {
         e.stopPropagation();
         if (download.status === "downloading") {
@@ -386,98 +401,175 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
 function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: () => void }) {
     const [url, setUrl] = useState("");
     const [isAdding, setIsAdding] = useState(false);
+    const [status, setStatus] = useState<string | null>(null);
+    const [torrentInfo, setTorrentInfo] = useState<TorrentInfo | null>(null);
+
 
     const handleAdd = async () => {
         if (!url) return;
 
-        // Validate URL format
         try {
-            new URL(url); // Will throw if invalid
+            new URL(url);
         } catch (e) {
             console.error("Invalid URL format");
+            setStatus("Error: Invalid URL format");
             return;
         }
 
         setIsAdding(true);
+        setStatus("Validating URL...");
+
         try {
-            const isMagnet = url.startsWith("magnet:");
-            // Clean filename: decode URI component if needed, and handle long names
-            let filename = "download";
-            if (!isMagnet) {
+            // Validate URL first
+            interface UrlTypeInfo {
+                is_magnet: boolean;
+                content_type: string | null;
+                content_length: number | null;
+            }
+
+            const typeInfo = await invoke<UrlTypeInfo>("validate_url_type", { url });
+
+            if (typeInfo.is_magnet) {
+                setStatus("Analyzing torrent metadata...");
+                const info = await invoke<TorrentInfo>("analyze_torrent", { url });
+                setStatus(null);
+                setTorrentInfo(info);
+            } else {
+                // Check if it's a webpage
+                if (typeInfo.content_type?.includes("text/html")) {
+                    const confirm = await window.confirm(
+                        "This URL appears to be a webpage, not a direct file download.\n\n" +
+                        "If you intended to download a torrent, please copy the MAGNET LINK instead.\n\n" +
+                        "Do you want to download this webpage as a file anyway?"
+                    );
+
+                    if (!confirm) {
+                        setIsAdding(false);
+                        setStatus(null);
+                        return;
+                    }
+                }
+
+                // Regular download logic
+                let filename = "download";
                 try {
                     const urlObj = new URL(url);
                     const pathSegments = urlObj.pathname.split('/');
                     const lastSegment = pathSegments[pathSegments.length - 1];
-                    if (lastSegment) {
-                        filename = decodeURIComponent(lastSegment).split('?')[0];
-                    }
-                    // Sanitize filename
+                    if (lastSegment) filename = decodeURIComponent(lastSegment).split('?')[0];
                     filename = filename.replace(/[<>:"/\\|?*]/g, '_');
-                    if (filename.length > 100) {
-                        filename = filename.substring(0, 100) + (filename.includes('.') ? '.' + filename.split('.').pop() : '');
+
+                    // Add extension if missing and we know content-type
+                    if (!filename.includes('.')) {
+                        if (typeInfo.content_type?.includes('html')) filename += '.html';
+                        else if (typeInfo.content_type?.includes('pdf')) filename += '.pdf';
+                        else if (typeInfo.content_type?.includes('zip')) filename += '.zip';
                     }
                 } catch (e) {
                     filename = "download_file";
                 }
-            } else {
-                filename = "Initializing Torrent...";
+                if (!filename || filename.trim() === "") filename = "download";
+
+                await invoke("add_download", { url, filename, filepath: "" });
+                onAdded();
+                onClose();
             }
+        } catch (err) {
+            console.error("Failed to add download:", err);
+            setStatus(`Error: ${err}`);
+        } finally {
+            if (!torrentInfo) setIsAdding(false);
+        }
+    };
 
-            // Ensure filename is never empty
-            if (!filename || filename.trim() === "") filename = "download";
-
-            const filepath = `./${filename}`;
-
-            if (isMagnet) {
-                await invoke("add_torrent", { url, filename, filepath });
-            } else {
-                await invoke("add_download", { url, filename, filepath });
-            }
+    const handleTorrentSelect = async (indices: number[]) => {
+        setIsAdding(true);
+        try {
+            // Now add the torrent with selection
+            await invoke("add_torrent", {
+                url,
+                filename: torrentInfo?.name || "Torrent Download",
+                filepath: "",
+                indices
+            });
             onAdded();
             onClose();
         } catch (err) {
-            console.error("Failed to add download:", err);
-            // Optionally set error state here to show in UI
+            console.error("Failed to start torrent:", err);
+            setStatus(`Error: ${err}`);
         } finally {
             setIsAdding(false);
         }
     };
 
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm animate-fade-in">
-            <div className="bg-brand-secondary border border-surface-border w-full max-w-lg rounded-xl p-6 shadow-2xl scale-100 transition-all relative overflow-hidden">
-                <h2 className="text-lg font-semibold text-text-primary mb-1">Add New Download</h2>
-                <p className="text-text-secondary text-sm mb-6">Enter a URL or Magnet link to start.</p>
+        <>
+            <ModalPortal>
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm animate-fade-in">
+                    <div className="bg-brand-secondary border border-surface-border w-full max-w-lg rounded-xl p-6 shadow-2xl scale-100 transition-all relative overflow-hidden text-left">
+                        <h2 className="text-lg font-semibold text-text-primary mb-1">Add New Download</h2>
+                        <p className="text-text-secondary text-sm mb-6">Enter a URL or Magnet link to start.</p>
 
-                <div className="space-y-4">
-                    <div>
-                        <input
-                            type="text"
-                            value={url}
-                            onChange={(e) => setUrl(e.target.value)}
-                            placeholder="https://example.com/file.zip or magnet:?xt=..."
-                            className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
-                            autoFocus
-                        />
-                    </div>
+                        <div className="space-y-4">
+                            <div className="relative">
+                                <input
+                                    autoFocus
+                                    type="text"
+                                    value={url}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                    placeholder="https://example.com/file.zip or magnet:?xt=..."
+                                    className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm pr-12"
+                                    onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+                                />
+                                <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                                    <Plus size={18} className="text-text-tertiary" />
+                                </div>
+                            </div>
 
-                    <div className="flex items-center gap-3 justify-end">
-                        <button
-                            onClick={onClose}
-                            className="px-4 py-2 text-text-secondary hover:text-text-primary font-medium hover:bg-brand-tertiary rounded-lg transition-all text-sm"
-                        >
-                            Cancel
-                        </button>
-                        <button
-                            onClick={handleAdd}
-                            disabled={isAdding || !url}
-                            className="btn-primary text-sm"
-                        >
-                            {isAdding ? "Starting..." : "Start Download"}
-                        </button>
+                            {status && (
+                                <div className={clsx(
+                                    "text-xs p-3 rounded-lg flex items-center gap-2",
+                                    status.startsWith("Error") ? "bg-status-error/10 text-status-error" : "bg-brand-tertiary text-text-secondary animate-pulse"
+                                )}>
+                                    {status.startsWith("Error") ? <AlertCircle size={14} /> : <DatabaseIcon size={14} />}
+                                    {status}
+                                </div>
+                            )}
+
+                            <div className="flex items-center justify-end gap-3 mt-8">
+                                <button
+                                    onClick={onClose}
+                                    className="px-4 py-2 text-text-secondary hover:text-text-primary font-medium hover:bg-brand-tertiary rounded-lg transition-all text-sm"
+                                    disabled={isAdding}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleAdd}
+                                    disabled={isAdding || !url}
+                                    className="btn-primary text-sm flex items-center gap-2"
+                                >
+                                    {isAdding && !torrentInfo && <div className="w-3 h-3 border-2 border-brand-primary border-t-transparent rounded-full animate-spin" />}
+                                    {isAdding && !torrentInfo ? "Analyzing..." : "Add Download"}
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </div>
-        </div>
+            </ModalPortal>
+
+            {torrentInfo && (
+                <ModalPortal>
+                    <TorrentFileSelector
+                        info={torrentInfo}
+                        onSelect={handleTorrentSelect}
+                        onCancel={() => {
+                            setTorrentInfo(null);
+                            setIsAdding(false);
+                        }}
+                    />
+                </ModalPortal>
+            )}
+        </>
     );
 }

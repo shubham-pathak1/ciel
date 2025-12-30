@@ -41,6 +41,46 @@ impl DownloadManager {
     }
 }
 
+// ... types for validation ...
+#[derive(serde::Serialize)]
+pub struct UrlTypeInfo {
+    is_magnet: bool,
+    content_type: Option<String>,
+    content_length: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
+    if url.starts_with("magnet:") {
+        return Ok(UrlTypeInfo {
+            is_magnet: true,
+            content_type: None,
+            content_length: None,
+        });
+    }
+
+    let client = reqwest::Client::new();
+    let response = client.head(&url)
+        .header("User-Agent", "Ciel/0.1.0") // Some sites block empty UA
+        .send().await.map_err(|e| e.to_string())?;
+    
+    let content_type = response.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+        
+    let content_length = response.headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
+
+    Ok(UrlTypeInfo {
+        is_magnet: false,
+        content_type,
+        content_length,
+    })
+}
+
 /// Helper to resolve authentic filepath
 fn resolve_download_path(db_path: &str, provided_path: &str) -> String {
     let p = Path::new(provided_path);
@@ -183,6 +223,7 @@ pub async fn add_torrent(
     url: String, // Magnet link or local file path
     mut filename: String,
     _filepath: String,
+    indices: Option<Vec<usize>>,
 ) -> Result<Download, String> {
     let is_magnet = url.starts_with("magnet:");
     
@@ -218,9 +259,30 @@ pub async fn add_torrent(
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
     db::log_event(&db_state.path, &download.id, "created", Some("Torrent download initiated")).ok();
 
-    torrent_manager.add_magnet(app, id, url, resolved_path, db_state.path.clone()).await?;
+    torrent_manager.add_magnet(app, id.clone(), url, resolved_path, db_state.path.clone(), indices).await?;
 
     Ok(download)
+}
+
+/// Analyze a torrent/magnet to get metadata
+#[tauri::command]
+pub async fn analyze_torrent(
+    _app: AppHandle,
+    torrent_manager: State<'_, TorrentManager>,
+    url: String,
+) -> Result<crate::torrent::TorrentInfo, String> {
+    torrent_manager.analyze_magnet(url).await
+}
+
+/// Start a torrent that was previously analyzed and added (starts as paused)
+#[tauri::command]
+pub async fn start_selective_torrent(
+    _app: AppHandle,
+    torrent_manager: State<'_, TorrentManager>,
+    id: String,
+    indices: Vec<usize>,
+) -> Result<(), String> {
+    torrent_manager.start_selective(&id, indices).await
 }
 
 /// Helper function to start the background download task
