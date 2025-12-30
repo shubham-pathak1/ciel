@@ -38,8 +38,9 @@ impl TorrentManager {
 
         let id_clone = id.clone();
 
+        let db_path_clone = db_path.clone();
         tokio::spawn(async move {
-            let name_updated = false;
+            let mut name_updated = false;
             let mut last_downloaded = handle.stats().progress_bytes;
             let mut last_time = std::time::Instant::now();
 
@@ -71,9 +72,32 @@ impl TorrentManager {
                     0
                 };
 
-                // 1. Update Filename discovery (Placeholder)
-                if !name_updated {
-                    // Real metadata retrieval will be restored once fields are confirmed
+                // 1. Update Filename & Metadata discovery
+                if !name_updated && stats.total_bytes > 0 {
+                    if let Some(info) = handle.shared().info() {
+                        let real_name = info.name.clone();
+                        let total_size = stats.total_bytes;
+                        
+                        // Update DB size
+                        let _ = crate::db::update_download_size(&db_path_clone, &id_clone, total_size as i64);
+                        
+                        // Update DB filename manually
+                        let db_p = db_path_clone.clone();
+                        let id_p = id_clone.clone();
+                        let name_p = real_name.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok(conn) = rusqlite::Connection::open(db_p) {
+                                let _ = conn.execute("UPDATE downloads SET filename = ?1 WHERE id = ?2", (name_p, id_p));
+                            }
+                        }).await;
+
+                        let _ = app.emit("download-name-updated", serde_json::json!({
+                            "id": id_clone,
+                            "filename": real_name
+                        }));
+                        
+                        name_updated = true;
+                    }
                 }
 
                 // Emit progress

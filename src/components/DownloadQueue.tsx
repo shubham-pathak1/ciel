@@ -303,15 +303,19 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                     </div>
 
                     {/* Progress Bar Container */}
-                    <div className="w-full h-1 bg-brand-tertiary rounded-full overflow-hidden">
-                        <div
-                            className={clsx(
-                                "h-full rounded-full transition-all duration-500",
-                                download.status === 'completed' ? 'bg-status-success' :
-                                    download.status === 'error' ? 'bg-status-error' : 'bg-text-primary'
-                            )}
-                            style={{ width: `${visualProgress}%` }}
-                        />
+                    <div className="w-full h-1 bg-brand-tertiary rounded-full overflow-hidden relative">
+                        {download.protocol === 'torrent' && download.size === 0 && download.status === 'downloading' ? (
+                            <div className="absolute inset-0 bg-text-primary/30 animate-pulse" />
+                        ) : (
+                            <div
+                                className={clsx(
+                                    "h-full rounded-full transition-all duration-500",
+                                    download.status === 'completed' ? 'bg-status-success' :
+                                        download.status === 'error' ? 'bg-status-error' : 'bg-text-primary'
+                                )}
+                                style={{ width: `${visualProgress}%` }}
+                            />
+                        )}
                     </div>
 
                     {/* Meta Data Row */}
