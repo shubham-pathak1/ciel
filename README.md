@@ -18,7 +18,6 @@
 - [x] Multi-connection HTTP/HTTPS downloads
 - [x] Magnet link & Torrent support
 - [x] Auto-resolving download paths
-- [x] Minimalist "Claude Desktop-inspired" UI
 
 ## Development
 
