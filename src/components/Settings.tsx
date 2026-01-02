@@ -3,6 +3,7 @@ import logo from "../assets/logo.png";
 import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
+import { open } from "@tauri-apps/plugin-dialog";
 
 interface SettingsState {
     download_path: string;
@@ -65,6 +66,27 @@ export function Settings() {
         setSettings(prev => ({ ...prev, [key]: value }));
     };
 
+    const handleBrowse = async () => {
+        try {
+            const selected = await open({
+                directory: true,
+                multiple: false,
+                defaultPath: settings.download_path,
+            });
+
+            if (selected) {
+                // Open returns null if cancelled, string if single selection, string[] if multiple
+                // Since multiple is false, it returns string | null
+                const path = Array.isArray(selected) ? selected[0] : selected;
+                if (path) {
+                    handleChange("download_path", path);
+                }
+            }
+        } catch (err) {
+            console.error("Failed to open dialog:", err);
+        }
+    };
+
     const sections = [
         { id: "general", title: "General", icon: Folder },
         { id: "network", title: "Network", icon: Globe },
@@ -87,7 +109,10 @@ export function Settings() {
                                     onChange={(e) => handleChange("download_path", e.target.value)}
                                     className="flex-1 bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-sm text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono"
                                 />
-                                <button className="px-6 py-3 bg-brand-secondary border border-surface-border rounded-lg text-sm font-medium text-text-primary hover:bg-brand-tertiary transition-colors">
+                                <button
+                                    onClick={handleBrowse}
+                                    className="px-6 py-3 bg-brand-secondary border border-surface-border rounded-lg text-sm font-medium text-text-primary hover:bg-brand-tertiary transition-colors"
+                                >
                                     Browse
                                 </button>
                             </div>

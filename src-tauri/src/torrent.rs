@@ -142,8 +142,11 @@ impl TorrentManager {
     }
 
     pub async fn analyze_magnet(&self, magnet: String) -> Result<TorrentInfo, String> {
+        let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
         let options = librqbit::AddTorrentOptions {
-            list_only: true,
+            output_folder: Some(temp_dir),
+            only_files: Some(vec![]),
+            overwrite: true,
             ..Default::default()
         };
         let response = self.session.add_torrent(librqbit::AddTorrent::from_url(magnet), Some(options)).await
@@ -153,40 +156,43 @@ impl TorrentManager {
         
         // Wait for metadata (timeout after 30s)
         let start = std::time::Instant::now();
-        while handle.stats().total_bytes == 0 {
-            if start.elapsed().as_secs() > 30 {
-                return Err("Timeout waiting for metadata".to_string());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
+        loop {
+            // Try to get metadata
+            let result = handle.with_metadata(|m| {
+                let files = m.file_infos.iter().enumerate().map(|(i, f)| {
+                    TorrentFile {
+                        name: f.relative_filename.to_string_lossy().to_string(),
+                        size: f.len,
+                        index: i,
+                    }
+                }).collect();
 
-        // Pause immediately after metadata is found
-        self.session.pause(&handle).await.ok();
-
-        // Get info while handle is active
-        let info = handle.with_metadata(|m| {
-            let files = m.file_infos.iter().enumerate().map(|(i, f)| {
-                TorrentFile {
-                    name: f.relative_filename.to_string_lossy().to_string(),
-                    size: f.len,
-                    index: i,
+                TorrentInfo {
+                    name: m.name.clone().unwrap_or_default(),
+                    total_size: m.file_infos.iter().map(|f| f.len).sum(),
+                    files,
                 }
-            }).collect();
+            });
 
-            TorrentInfo {
-                name: m.name.clone().unwrap_or_default(),
-                total_size: m.file_infos.iter().map(|f| f.len).sum(),
-                files,
+            match result {
+                Ok(info) => {
+                    // Success! Remove from session and return info
+                    // Remove from session so it can be re-added with selective files later
+                    // Use the infohash from the handle
+                    let info_hash = handle.info_hash();
+                    self.session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
+                        .map_err(|e| e.to_string())?;
+                    return Ok(info);
+                },
+                Err(_) => {
+                    // Metadata not ready yet or other error (likely just not ready if we just added it)
+                    if start.elapsed().as_secs() > 30 {
+                        return Err("Timeout waiting for metadata".to_string());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
             }
-        }).map_err(|e| e.to_string())?;
-
-        // Remove from session so it can be re-added with selective files later
-        // Use the infohash from the handle
-        let info_hash = handle.info_hash();
-        self.session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
-            .map_err(|e| e.to_string())?;
-
-        Ok(info)
+        }
     }
 
     pub async fn start_selective(&self, id: &str, _indices: Vec<usize>) -> Result<(), String> {
