@@ -10,6 +10,7 @@ interface SettingsState {
     max_connections: string;
     auto_resume: string;
     theme: string;
+    ask_location: string;
 }
 
 export function Settings() {
@@ -18,6 +19,7 @@ export function Settings() {
         max_connections: "8",
         auto_resume: "true",
         theme: "dark",
+        ask_location: "false",
     });
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
@@ -36,6 +38,7 @@ export function Settings() {
                 max_connections: result.max_connections || "8",
                 auto_resume: result.auto_resume || "true",
                 theme: result.theme || "dark",
+                ask_location: result.ask_location || "false",
             });
 
             // Check for active downloads
@@ -117,6 +120,25 @@ export function Settings() {
                                 </button>
                             </div>
                             <p className="text-xs text-text-tertiary font-medium">All your downloads will be saved here unless specified otherwise.</p>
+                        </div>
+
+                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
+                            <div>
+                                <h4 className="text-base font-medium text-text-primary mb-1">Ask for location</h4>
+                                <p className="text-xs text-text-tertiary">Select download location manually for every new task.</p>
+                            </div>
+                            <button
+                                onClick={() => handleChange("ask_location", settings.ask_location === "true" ? "false" : "true")}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
+                                    settings.ask_location === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                )}
+                            >
+                                <div className={clsx(
+                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
+                                    settings.ask_location === "true" ? 'translate-x-7' : 'translate-x-1'
+                                )} />
+                            </button>
                         </div>
                     </div>
                 );

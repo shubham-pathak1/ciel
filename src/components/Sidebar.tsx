@@ -3,7 +3,6 @@ import {
     PlayCircle,
     CheckCircle,
     Settings as SettingsIcon,
-    Plus,
 } from "lucide-react";
 import clsx from "clsx";
 
@@ -30,17 +29,6 @@ const navItems: NavItem[] = [
 export function Sidebar({ currentView, onViewChange }: SidebarProps) {
     return (
         <aside className="w-64 flex flex-col items-center py-6 px-4 bg-brand-primary border-r border-surface-border z-20">
-            {/* Add Download Button */}
-            <div className="w-full mb-6">
-                <button
-                    onClick={() => { /* Trigger add modal via prop or context if needed, currently just visual in Sidebar */ }}
-                    className="w-full btn-primary flex items-center justify-center gap-3 py-2.5 shadow-sm hover:shadow-md transition-all duration-200"
-                >
-                    <Plus size={18} />
-                    <span className="font-medium tracking-wide text-sm">New Task</span>
-                </button>
-            </div>
-
             {/* Navigation */}
             <nav className="w-full flex-1">
                 <ul className="space-y-1">

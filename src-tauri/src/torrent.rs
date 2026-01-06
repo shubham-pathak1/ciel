@@ -40,9 +40,11 @@ impl TorrentManager {
         }
     }
 
-    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, _output_folder: String, db_path: String, indices: Option<Vec<usize>>) -> Result<(), String> {
+    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>) -> Result<(), String> {
         let options = librqbit::AddTorrentOptions {
             only_files: indices,
+            output_folder: Some(output_folder.clone()),
+            overwrite: true,
             ..Default::default()
         };
         let response = self.session.add_torrent(AddTorrent::from_url(magnet), Some(options)).await
@@ -58,6 +60,7 @@ impl TorrentManager {
         let id_clone = id.clone();
 
         let db_path_clone = db_path.clone();
+        let output_folder_clone = output_folder.clone();
         tokio::spawn(async move {
             let mut name_updated = false;
             let mut last_downloaded = handle.stats().progress_bytes;
@@ -100,13 +103,18 @@ impl TorrentManager {
                         // Update DB size
                         let _ = crate::db::update_download_size(&db_path_clone, &id_clone, total_size as i64);
                         
-                        // Update DB filename manually
+                        // Update DB filename & filepath
                         let db_p = db_path_clone.clone();
                         let id_p = id_clone.clone();
-                        let name_p = real_name.clone();
+                        let name_str = real_name.clone().unwrap_or_else(|| "torrent_download".to_string());
+                        let final_filepath = crate::commands::resolve_download_path(&app, &db_p, &name_str, Some(output_folder_clone.clone()));
+                        
                         tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = rusqlite::Connection::open(db_p) {
-                                let _ = conn.execute("UPDATE downloads SET filename = ?1 WHERE id = ?2", (name_p, id_p));
+                                let _ = conn.execute(
+                                    "UPDATE downloads SET filename = ?1, filepath = ?2 WHERE id = ?3", 
+                                    (&name_str, final_filepath, id_p)
+                                );
                             }
                         });
 

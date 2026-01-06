@@ -15,9 +15,11 @@
 - **Engine**: `librqbit` (Torrents) + `reqwest` (HTTP)
 
 ## Features
-- [x] Multi-connection HTTP/HTTPS downloads
-- [x] Magnet link & Torrent support
-- [x] Auto-resolving download paths
+- [x] **Smart Link Resolution**: Automatically resolve Google Drive links and bypass virus scan confirmations.
+- [x] **HTTP Download Preview**: Interactive metadata preview (filename, size) before starting a download.
+- [x] **Multi-connection Engine**: High-speed multi-threaded downloads via `reqwest`.
+- [x] **Selective Torrenting**: Detailed file selection for Magnet links and `.torrent` files.
+- [x] **Dynamic Path Resolution**: Smart handling of output folders and file naming.
 
 ## Development
 
