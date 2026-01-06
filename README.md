@@ -2,24 +2,36 @@
 
 > **Status**: 🚧 In Development (Alpha)
 
-**Ciel** is a high-performance download manager made using tauri. Built for users who value speed, privacy, and distraction-free software.
+**Ciel** is a high-performance download manager built with Tauri. Designed for users who value speed, privacy, and distraction-free software.
 
 ## Philosophy
-- **Performance**: Native Rust backend via Tauri.
+- **Performance**: Native Rust backend via Tauri 2.0
 - **Privacy**: Zero telemetry. All data stays local.
+- **Minimalism**: Clean, focused UI without unnecessary bloat.
 
 ## Tech Stack
 - **Core**: Tauri v2 + Rust
 - **Frontend**: React + TypeScript + Vite
-- **Styling**: Tailwind CSS (Zinc/Slate theme)
-- **Engine**: `librqbit` (Torrents) + `reqwest` (HTTP)
+- **Styling**: Tailwind CSS (Monochrome Zinc/Slate theme)
+- **Engines**: `librqbit` (Torrents) + `reqwest` (HTTP)
 
 ## Features
-- [x] **Smart Link Resolution**: Automatically resolve Google Drive links and bypass virus scan confirmations.
-- [x] **HTTP Download Preview**: Interactive metadata preview (filename, size) before starting a download.
-- [x] **Multi-connection Engine**: High-speed multi-threaded downloads via `reqwest`.
-- [x] **Selective Torrenting**: Detailed file selection for Magnet links and `.torrent` files.
-- [x] **Dynamic Path Resolution**: Smart handling of output folders and file naming.
+
+### Downloads
+- **Multi-Connection HTTP Engine**: High-speed parallel downloads with automatic retry
+- **Smart Filename Extraction**: RFC 5987 compliant parsing of `Content-Disposition` headers
+- **Google Drive Resolution**: Automatically resolves Drive links and bypasses virus scan confirmations
+- **Configurable Download Location**: Choose default folder or ask every time
+
+### Torrents
+- **Selective File Download**: Preview and select specific files from torrents before downloading
+- **Metadata Preview**: View torrent contents and file sizes before committing
+- **Peer Statistics**: Real-time peer count and download speed
+
+### UI/UX
+- **Monochrome Design**: Clean, matte dark theme inspired by modern desktop apps
+- **Progress Tracking**: Visual progress bars with speed, ETA, and connection count
+- **Open in Folder**: One-click access to downloaded files in explorer
 
 ## Development
 
