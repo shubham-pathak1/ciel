@@ -1,20 +1,12 @@
-import { useState, useEffect } from "react";
-import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Plus, AlertCircle, Database as DatabaseIcon } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Video as VideoIcon, Database as DatabaseIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 import clsx from "clsx";
 import { ModalPortal } from "./ModalPortal";
 import { TorrentFileSelector } from "./TorrentFileSelector";
-
-// User code didn't have location picker in modal. I will skip it to match their UI EXACTLY.
-// If they want 'ask location', the Settings 'ask_location' logic in backend handles it?
-// Wait, my backend logic for 'ask_location' relies on frontend strictly?
-// Let's check backend add_download. It doesn't seem to open dialog.
-// But the user said "let me send the old file to you". The old file DOES NOT have the location picker.
-// I will respect the old file. If 'ask_location' is broken, we fix it later.
-// Actually, I'll keep the import but only use it if I really need to match logic. 
-// User's provided code doesn't import 'open'. I will omit it to be safe and exact.
+import { VideoPreview } from "./VideoPreview";
 
 interface TorrentFile {
     name: string;
@@ -23,7 +15,7 @@ interface TorrentFile {
 }
 
 interface TorrentInfo {
-    id?: string; // Add id optional from my previous edits, or just keep strict? logic uses name.
+    id?: string;
     name: string;
     total_size: number;
     files: TorrentFile[];
@@ -42,7 +34,7 @@ interface DownloadItem {
     speed: number;
     eta: number;
     connections: number;
-    protocol: "http" | "torrent";
+    protocol: "http" | "torrent" | "video";
     status: "downloading" | "paused" | "completed" | "queued" | "error";
     filepath: string;
 }
@@ -59,16 +51,16 @@ interface ProgressPayload {
 const formatSize = (bytes: number) => {
     if (bytes === 0) return '0 B';
     if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    if (bytes < 1024 * 1024) return `${((bytes / 1024)).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${((bytes / (1024 * 1024))).toFixed(1)} MB`;
+    return `${((bytes / (1024 * 1024 * 1024))).toFixed(2)} GB`;
 };
 
 const formatSpeed = (bytesPerSec: number) => {
     if (bytesPerSec === 0) return "0 B/s";
     if (bytesPerSec < 1024) return `${bytesPerSec} B/s`;
-    if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
-    return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
+    if (bytesPerSec < 1024 * 1024) return `${((bytesPerSec / 1024)).toFixed(1)} KB/s`;
+    return `${((bytesPerSec / (1024 * 1024))).toFixed(1)} MB/s`;
 };
 
 const formatEta = (seconds: number) => {
@@ -81,21 +73,21 @@ const formatEta = (seconds: number) => {
 export function DownloadQueue({ filter }: DownloadQueueProps) {
     const [downloads, setDownloads] = useState<DownloadItem[]>([]);
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+    const [detectedUrl, setDetectedUrl] = useState<string | null>(null);
+    const [autocatchUrl, setAutocatchUrl] = useState("");
+
+    const handleRefreshList = async () => {
+        try {
+            const res = await invoke<DownloadItem[]>("get_downloads");
+            setDownloads(res);
+        } catch (err) {
+            console.error("Failed to fetch downloads:", err);
+        }
+    };
 
     useEffect(() => {
-        // Fetch initial downloads
-        const fetchDownloads = async () => {
-            try {
-                const res = await invoke<DownloadItem[]>("get_downloads");
-                setDownloads(res);
-            } catch (err) {
-                console.error("Failed to fetch downloads:", err);
-            }
-        };
+        handleRefreshList();
 
-        fetchDownloads();
-
-        // Listen for progress updates
         const unlistenProgress = listen<ProgressPayload>("download-progress", (event) => {
             const progress = event.payload;
             setDownloads((prev) =>
@@ -108,7 +100,6 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
                             speed: progress.speed,
                             eta: progress.eta,
                             connections: progress.connections,
-                            protocol: d.protocol, // Preserve protocol
                             status: "downloading",
                         };
                     }
@@ -117,41 +108,23 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
             );
         });
 
-        const unlistenCompleted = listen<string>("download-completed", (event) => {
-            const id = event.payload;
-            setDownloads((prev) =>
-                prev.map((d) => {
-                    if (d.id === id) {
-                        return { ...d, status: "completed", speed: 0 };
-                    }
-                    return d;
-                })
-            );
-        });
-
-        const unlistenError = listen<[string, string]>("download-error", (event) => {
-            const [id] = event.payload;
-            setDownloads((prev) =>
-                prev.map((d) => {
-                    if (d.id === id) {
-                        return { ...d, status: "error", speed: 0 };
-                    }
-                    return d;
-                })
-            );
+        const unlistenCompleted = listen<string>("download-completed", () => {
+            handleRefreshList();
         });
 
         const unlistenName = listen<{ id: string; filename: string }>("download-name-updated", (event) => {
-            setDownloads((prev) => {
-                return prev.map(d => d.id === event.payload.id ? { ...d, filename: event.payload.filename } : d);
-            });
+            setDownloads((prev) => prev.map(d => d.id === event.payload.id ? { ...d, filename: event.payload.filename } : d));
+        });
+
+        const unlistenAutocatch = listen<string>("autocatch-url", (event) => {
+            setDetectedUrl(event.payload);
         });
 
         return () => {
             unlistenProgress.then((u) => u());
             unlistenCompleted.then((u) => u());
-            unlistenError.then((u) => u());
             unlistenName.then((u) => u());
+            unlistenAutocatch.then((u) => u());
         };
     }, []);
 
@@ -166,11 +139,6 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
         active: "Active Downloads",
         completed: "History",
         settings: "Settings"
-    };
-
-    const handleRefreshList = async () => {
-        const res = await invoke<DownloadItem[]>("get_downloads");
-        setDownloads(res);
     };
 
     return (
@@ -224,7 +192,24 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
                     <AddDownloadModal
                         onClose={() => setIsAddModalOpen(false)}
                         onAdded={handleRefreshList}
+                        initialUrl={autocatchUrl}
                     />
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {detectedUrl && (
+                    <div className="fixed bottom-8 right-8 z-[60]">
+                        <AutocatchNotification
+                            url={detectedUrl}
+                            onAdd={() => {
+                                setAutocatchUrl(detectedUrl);
+                                setIsAddModalOpen(true);
+                                setDetectedUrl(null);
+                            }}
+                            onDismiss={() => setDetectedUrl(null)}
+                        />
+                    </div>
                 )}
             </AnimatePresence>
         </div>
@@ -253,110 +238,83 @@ function EmptyState({ filter, onAdd }: { filter: string, onAdd: () => void }) {
     );
 }
 
-function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefresh: () => void }) {
-    const progress = download.size > 0 ? (download.downloaded / download.size) * 100 : 0;
+const DownloadCard = React.forwardRef<HTMLDivElement, { download: DownloadItem, onRefresh: () => void }>(
+    ({ download, onRefresh }, ref) => {
+        const progress = download.size > 0 ? (download.downloaded / download.size) * 100 : 0;
+        const [visualProgress, setVisualProgress] = useState(progress);
 
-    // Smooth progress for visual
-    const [visualProgress, setVisualProgress] = useState(progress);
-    useEffect(() => {
-        setVisualProgress(progress);
-    }, [progress]);
+        useEffect(() => {
+            setVisualProgress(progress);
+        }, [progress]);
 
-    const handlePauseResume = async (e: React.MouseEvent) => {
-        e.stopPropagation();
-        if (download.status === "downloading") {
-            await invoke("pause_download", { id: download.id });
-        } else {
-            await invoke("resume_download", { id: download.id });
-        }
-        onRefresh();
-    };
+        const handlePauseResume = async (e: React.MouseEvent) => {
+            e.stopPropagation();
+            if (download.status === "downloading") {
+                await invoke("pause_download", { id: download.id });
+            } else {
+                await invoke("resume_download", { id: download.id });
+            }
+            onRefresh();
+        };
 
-    const handleDelete = async (e: React.MouseEvent) => {
-        e.stopPropagation();
-        await invoke("delete_download", { id: download.id });
-        onRefresh();
-    };
+        const handleDelete = async (e: React.MouseEvent) => {
+            e.stopPropagation();
+            await invoke("delete_download", { id: download.id });
+            onRefresh();
+        };
 
-    const getStatusColor = () => {
-        if (download.status === 'completed') return 'text-status-success';
-        if (download.status === 'error') return 'text-status-error';
-        if (download.status === 'paused') return 'text-status-warning';
-        return 'text-text-primary';
-    };
+        const getStatusColor = () => {
+            if (download.status === 'completed') return 'text-status-success';
+            if (download.status === 'error') return 'text-status-error';
+            if (download.status === 'paused') return 'text-status-warning';
+            return 'text-text-primary';
+        };
 
-    return (
-        <motion.div
-            layout
-            initial={{ opacity: 0, y: 5, scale: 0.99 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
-            className="card-base p-4 group card-hover relative overflow-hidden"
-        >
-            {/* Background Progress Tint - Subtle */}
+        const ProtocolIcon = () => {
+            if (download.protocol === 'video') return <VideoIcon className={clsx("w-5 h-5", getStatusColor())} />;
+            return <FileDown className={clsx("w-5 h-5", getStatusColor())} />;
+        };
+
+        return (
             <motion.div
+                ref={ref}
                 layout
-                className="absolute inset-y-0 left-0 bg-brand-tertiary/20 z-0 pointer-events-none"
-                style={{ width: `${visualProgress}%` }}
-                transition={{ type: "spring", stiffness: 400, damping: 40 }}
-            />
+                initial={{ opacity: 0, y: 5, scale: 0.99 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
+                className="card-base p-4 group card-hover relative overflow-hidden"
+            >
+                <motion.div
+                    layout
+                    className="absolute inset-y-0 left-0 bg-brand-tertiary/20 z-0 pointer-events-none"
+                    style={{ width: `${visualProgress}%` }}
+                    transition={{ type: "spring", stiffness: 400, damping: 40 }}
+                />
 
-            <div className="relative z-10 flex gap-4 items-center">
-                {/* Icon Box */}
-                <div className="w-10 h-10 rounded-lg bg-brand-tertiary flex items-center justify-center">
-                    <motion.div
-                        animate={download.status === 'completed' ? { scale: [1, 1.3, 1] } : {}}
-                        transition={{ duration: 0.4 }}
-                    >
-                        <FileDown className={clsx("w-5 h-5", getStatusColor())} />
-                    </motion.div>
-                </div>
+                <div className="relative z-10 flex gap-4 items-center">
+                    <div className="w-10 h-10 rounded-lg bg-brand-tertiary flex items-center justify-center">
+                        <ProtocolIcon />
+                    </div>
 
-                {/* Content */}
-                <div className="flex-1 min-w-0 flex flex-col gap-1.5">
-                    {/* Header Row */}
-                    <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between">
                             <h3 className="text-sm font-medium text-text-primary truncate" title={download.filename}>
                                 {download.filename}
                             </h3>
-                            {download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued') && (download.status === 'downloading' || download.status === 'queued') && (
-                                <span className="bg-amber-500/10 text-amber-500 text-[10px] px-1.5 py-0.5 rounded border border-amber-500/20 font-bold tracking-wider animate-pulse whitespace-nowrap">
-                                    INITIALIZING
-                                </span>
-                            )}
+                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button onClick={handlePauseResume} className="btn-ghost p-1.5">
+                                    {download.status === "downloading" ? <Pause size={14} /> : <Play size={14} />}
+                                </button>
+                                <button onClick={() => invoke("show_in_folder", { path: download.filepath })} className="btn-ghost p-1.5">
+                                    <FolderOpen size={14} />
+                                </button>
+                                <button onClick={handleDelete} className="btn-ghost p-1.5 text-status-error">
+                                    <Trash2 size={14} />
+                                </button>
+                            </div>
                         </div>
 
-                        {/* Actions */}
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                            <button
-                                onClick={handlePauseResume}
-                                className="btn-ghost p-1.5"
-                            >
-                                {download.status === "downloading" ? <Pause size={14} /> : <Play size={14} />}
-                            </button>
-                            <button
-                                onClick={() => {
-                                    invoke("show_in_folder", { path: download.filepath });
-                                }}
-                                className="btn-ghost p-1.5"
-                            >
-                                <FolderOpen size={14} />
-                            </button>
-                            <button
-                                onClick={handleDelete}
-                                className="btn-ghost p-1.5 text-status-error hover:text-red-400"
-                            >
-                                <Trash2 size={14} />
-                            </button>
-                        </div>
-                    </div>
-
-                    {/* Progress Bar Container */}
-                    <div className="w-full h-1 bg-brand-tertiary rounded-full overflow-hidden relative">
-                        {download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued') && (download.status === 'downloading' || download.status === 'queued') ? (
-                            <div className="absolute inset-0 bg-text-primary/30 animate-pulse" />
-                        ) : (
+                        <div className="w-full h-1 bg-brand-tertiary rounded-full overflow-hidden relative">
                             <motion.div
                                 layout
                                 className={clsx(
@@ -367,171 +325,112 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                                 style={{ width: `${visualProgress}%` }}
                                 transition={{ type: "spring", stiffness: 400, damping: 40 }}
                             />
-                        )}
-                    </div>
-
-                    {/* Meta Data Row */}
-                    <div className="flex items-center justify-between text-xs text-text-secondary mt-0.5">
-                        <div className="flex items-center gap-3">
-                            <span>
-                                {download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued') && (download.status === 'downloading' || download.status === 'queued') ? (
-                                    <span className="text-amber-500 animate-pulse">Fetching metadata...</span>
-                                ) : (
-                                    <>
-                                        {formatSize(download.downloaded)} <span className="text-text-tertiary">/</span> {formatSize(download.size)}
-                                    </>
-                                )}
-                            </span>
-
-                            {download.status === 'downloading' && (
-                                <>
-                                    <div className="flex items-center gap-1 text-text-primary">
-                                        <ArrowDown size={10} />
-                                        <span>{formatSpeed(download.speed)}</span>
-                                    </div>
-                                    <div className="flex items-center gap-1 text-text-tertiary">
-                                        {download.protocol === 'torrent' ? (
-                                            <>
-                                                <Users size={10} />
-                                                <span>{download.connections} Peers</span>
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Wifi size={10} />
-                                                <span>{download.connections} Conns</span>
-                                            </>
-                                        )}
-                                    </div>
-                                </>
-                            )}
                         </div>
 
-                        <div className="flex items-center gap-2">
-                            {download.status === 'downloading' && (
-                                <div className="flex items-center gap-1 text-text-tertiary">
-                                    <Clock size={10} />
-                                    <span className="font-mono">{formatEta(download.eta)}</span>
-                                </div>
-                            )}
-                            <span className={clsx("font-medium", getStatusColor())}>
-                                {download.status === 'completed'
-                                    ? 'Done'
-                                    : (download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued'))
-                                        ? 'Initializing...'
-                                        : `${visualProgress.toFixed(1)}%`}
-                            </span>
+                        <div className="flex items-center justify-between text-xs text-text-secondary mt-0.5">
+                            <div className="flex items-center gap-3">
+                                <span>{formatSize(download.downloaded)} / {formatSize(download.size)}</span>
+                                {download.status === 'downloading' && (
+                                    <>
+                                        <div className="flex items-center gap-1 text-text-primary">
+                                            <ArrowDown size={10} />
+                                            <span>{formatSpeed(download.speed)}</span>
+                                        </div>
+                                        <div className="flex items-center gap-1 text-text-tertiary">
+                                            {download.protocol === 'torrent' ? <Users size={10} /> : <Wifi size={10} />}
+                                            <span>{download.connections}</span>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                                {download.status === 'downloading' && (
+                                    <div className="flex items-center gap-1 text-text-tertiary">
+                                        <Clock size={10} />
+                                        <span className="font-mono">{formatEta(download.eta)}</span>
+                                    </div>
+                                )}
+                                <span className={clsx("font-medium", getStatusColor())}>
+                                    {download.status === 'completed' ? 'Done' : `${visualProgress.toFixed(1)}%`}
+                                </span>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
-        </motion.div>
-    );
-}
+            </motion.div>
+        );
+    }
+);
 
-function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: () => void }) {
-    const [url, setUrl] = useState("");
+function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () => void, onAdded: () => void, initialUrl?: string }) {
+    const [url, setUrl] = useState(initialUrl);
     const [isAdding, setIsAdding] = useState(false);
     const [status, setStatus] = useState<string | null>(null);
     const [torrentInfo, setTorrentInfo] = useState<TorrentInfo | null>(null);
+    const [videoMetadata, setVideoMetadata] = useState<any | null>(null);
+
+    useEffect(() => {
+        if (initialUrl) {
+            handleAdd();
+        }
+    }, [initialUrl]);
 
     const handleAdd = async () => {
         if (!url) return;
-
-        try {
-            new URL(url);
-        } catch (e) {
-            console.error("Invalid URL format");
-            setStatus("Error: Invalid URL format");
-            return;
-        }
+        try { new URL(url); } catch (e) { setStatus("Error: Invalid URL"); return; }
 
         setIsAdding(true);
-        setStatus("Validating URL...");
+        setStatus("Analyzing...");
 
         try {
-            // Validate URL first
-            interface UrlTypeInfo {
-                is_magnet: boolean;
-                content_type: string | null;
-                content_length: number | null;
-                hinted_filename: string | null;
+            const isVideoSite = /youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|vimeo\.com|facebook\.com/.test(url);
+            if (isVideoSite) {
+                try {
+                    const metadata = await invoke("analyze_video_url", { url });
+                    setVideoMetadata(metadata);
+                    setStatus(null);
+                    return;
+                } catch (e) { console.warn("Video analysis failed", e); }
             }
 
-            const typeInfo = await invoke<UrlTypeInfo>("validate_url_type", { url });
-
+            const typeInfo = await invoke<any>("validate_url_type", { url });
             if (typeInfo.is_magnet) {
-                setStatus("Analyzing torrent metadata...");
                 const info = await invoke<TorrentInfo>("analyze_torrent", { url });
-                setStatus(null);
                 setTorrentInfo(info);
+                setStatus(null);
             } else {
-                // Check if it's a webpage
-                if (typeInfo.content_type?.includes("text/html")) {
-                    // Note: window.confirm might be blocked in some Tauri contexts, but user code used it.
-                    // We assume it works or they deal with it.
-                    const confirm = await window.confirm(
-                        "This URL appears to be a webpage, not a direct file download.\n\n" +
-                        "If you intended to download a torrent, please copy the MAGNET LINK instead.\n\n" +
-                        "Do you want to download this webpage as a file anyway?"
-                    );
-
-                    if (!confirm) {
-                        setIsAdding(false);
-                        setStatus(null);
-                        return;
-                    }
-                }
-
-                // Use server-provided filename if available, otherwise extract from URL
-                let filename = typeInfo.hinted_filename || "download";
-
-                if (!typeInfo.hinted_filename) {
-                    try {
-                        const urlObj = new URL(url);
-                        const pathSegments = urlObj.pathname.split('/');
-                        const lastSegment = pathSegments[pathSegments.length - 1];
-                        if (lastSegment) filename = decodeURIComponent(lastSegment).split('?')[0];
-                        filename = filename.replace(/[<>:"/\\|?*]/g, '_');
-
-                        // Add extension if missing and we know content-type
-                        if (!filename.includes('.')) {
-                            if (typeInfo.content_type?.includes('html')) filename += '.html';
-                            else if (typeInfo.content_type?.includes('pdf')) filename += '.pdf';
-                            else if (typeInfo.content_type?.includes('zip')) filename += '.zip';
-                        }
-                    } catch (e) {
-                        filename = "download_file";
-                    }
-                }
-
-                if (!filename || filename.trim() === "") filename = "download";
-
-                await invoke("add_download", { url, filename, filepath: "" });
+                await invoke("add_download", { url, filename: typeInfo.hinted_filename || "download", filepath: "" });
                 onAdded();
                 onClose();
             }
         } catch (err) {
-            console.error("Failed to add download:", err);
             setStatus(`Error: ${err}`);
         } finally {
-            if (!torrentInfo) setIsAdding(false);
+            if (!torrentInfo && !videoMetadata) setIsAdding(false);
+        }
+    };
+
+    const handleVideoDownload = async (formatId: string, ext: string) => {
+        setIsAdding(true);
+        try {
+            const filename = `${videoMetadata.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
+            await invoke("add_video_download", { url, formatId, filepath: filename });
+            onAdded();
+            onClose();
+        } catch (err) {
+            setStatus(`Error: ${err}`);
+        } finally {
+            setIsAdding(false);
         }
     };
 
     const handleTorrentSelect = async (indices: number[]) => {
         setIsAdding(true);
         try {
-            // Add the torrent with selection
-            await invoke("add_torrent", {
-                url,
-                filename: torrentInfo?.name || "Torrent Download",
-                filepath: "",
-                indices
-            });
+            await invoke("add_torrent", { url, filename: torrentInfo?.name || "Torrent", filepath: "", indices });
             onAdded();
             onClose();
         } catch (err) {
-            console.error("Failed to start torrent/zip:", err);
             setStatus(`Error: ${err}`);
         } finally {
             setIsAdding(false);
@@ -543,59 +442,49 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
             <ModalPortal>
                 <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm">
                     <motion.div
-                        initial={{ opacity: 0, scale: 0.98, y: 10 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.98, y: 5 }}
-                        transition={{ duration: 0.15, ease: "easeOut" }}
-                        className="bg-brand-secondary border border-surface-border w-full max-w-lg rounded-xl p-6 shadow-2xl relative overflow-hidden text-left"
+                        initial={{ opacity: 0, scale: 0.98 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.98 }}
+                        className="bg-brand-secondary border border-surface-border w-full max-w-lg rounded-xl p-6 shadow-2xl relative text-left"
                     >
-                        <h2 className="text-lg font-semibold text-text-primary mb-1">Add New Download</h2>
-                        <p className="text-text-secondary text-sm mb-6">Enter a URL or Magnet link to start.</p>
+                        <h2 className="text-lg font-semibold text-text-primary mb-1">
+                            {videoMetadata ? "Video Options" : "Add New Download"}
+                        </h2>
+                        <p className="text-text-secondary text-sm mb-6">
+                            {videoMetadata ? "Select quality." : "Enter a URL or Magnet link."}
+                        </p>
 
-                        <div className="space-y-4">
-                            <div className="relative">
+                        {videoMetadata ? (
+                            <VideoPreview
+                                metadata={videoMetadata}
+                                onCancel={() => { setVideoMetadata(null); setIsAdding(false); }}
+                                onDownload={handleVideoDownload}
+                            />
+                        ) : (
+                            <div className="space-y-4">
                                 <input
                                     autoFocus
                                     type="text"
                                     value={url}
                                     onChange={(e) => setUrl(e.target.value)}
-                                    placeholder="https://example.com/file.zip or magnet:?xt=..."
-                                    className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm pr-12"
+                                    placeholder="https://..."
+                                    className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
                                     onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
                                 />
-                                <div className="absolute right-4 top-1/2 -translate-y-1/2">
-                                    <Plus size={18} className="text-text-tertiary" />
+                                {status && (
+                                    <div className="text-xs p-3 rounded-lg bg-brand-tertiary text-text-secondary flex items-center gap-2">
+                                        <DatabaseIcon size={14} />
+                                        {status}
+                                    </div>
+                                )}
+                                <div className="flex justify-end gap-3 mt-8">
+                                    <button onClick={onClose} className="px-4 py-2 text-text-secondary text-sm" disabled={isAdding}>Cancel</button>
+                                    <button onClick={handleAdd} disabled={isAdding || !url} className="btn-primary text-sm">
+                                        {isAdding ? "Analyzing..." : "Add Download"}
+                                    </button>
                                 </div>
                             </div>
-
-                            {status && (
-                                <div className={clsx(
-                                    "text-xs p-3 rounded-lg flex items-center gap-2",
-                                    status.startsWith("Error") ? "bg-status-error/10 text-status-error" : "bg-brand-tertiary text-text-secondary animate-pulse"
-                                )}>
-                                    {status.startsWith("Error") ? <AlertCircle size={14} /> : <DatabaseIcon size={14} />}
-                                    {status}
-                                </div>
-                            )}
-
-                            <div className="flex items-center justify-end gap-3 mt-8">
-                                <button
-                                    onClick={onClose}
-                                    className="px-4 py-2 text-text-secondary hover:text-text-primary font-medium hover:bg-brand-tertiary rounded-lg transition-all text-sm"
-                                    disabled={isAdding}
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    onClick={handleAdd}
-                                    disabled={isAdding || !url}
-                                    className="btn-primary text-sm flex items-center gap-2"
-                                >
-                                    {isAdding && !torrentInfo && <div className="w-3 h-3 border-2 border-brand-primary border-t-transparent rounded-full animate-spin" />}
-                                    {isAdding && !torrentInfo ? "Analyzing..." : "Add Download"}
-                                </button>
-                            </div>
-                        </div>
+                        )}
                     </motion.div>
                 </div>
             </ModalPortal>
@@ -605,13 +494,37 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
                     <TorrentFileSelector
                         info={torrentInfo}
                         onSelect={handleTorrentSelect}
-                        onCancel={() => {
-                            setTorrentInfo(null);
-                            setIsAdding(false);
-                        }}
+                        onCancel={() => { setTorrentInfo(null); setIsAdding(false); }}
                     />
                 </ModalPortal>
             )}
         </>
+    );
+}
+
+function AutocatchNotification({ url, onAdd, onDismiss }: { url: string, onAdd: () => void, onDismiss: () => void }) {
+    return (
+        <motion.div
+            initial={{ opacity: 0, x: 20, scale: 0.95 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, x: 20, scale: 0.95 }}
+            className="bg-brand-secondary border border-surface-border p-4 rounded-xl shadow-2xl flex items-center gap-4 min-w-[320px] max-w-md"
+        >
+            <div className="w-10 h-10 rounded-full bg-brand-tertiary flex items-center justify-center text-text-primary">
+                <Wifi size={20} />
+            </div>
+            <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-0.5">Link Detected</p>
+                <p className="text-sm text-text-primary truncate font-mono">{url}</p>
+            </div>
+            <div className="flex items-center gap-2">
+                <button onClick={onDismiss} className="p-2 text-text-tertiary hover:text-text-primary transition-colors">
+                    <Trash2 size={16} />
+                </button>
+                <button onClick={onAdd} className="bg-text-primary text-brand-primary px-3 py-1.5 rounded-lg text-xs font-bold hover:opacity-90 transition-opacity">
+                    Add
+                </button>
+            </div>
+        </motion.div>
     );
 }

@@ -54,6 +54,7 @@ impl DownloadStatus {
 pub enum DownloadProtocol {
     Http,
     Torrent,
+    Video,
 }
 
 impl DownloadProtocol {
@@ -61,12 +62,14 @@ impl DownloadProtocol {
         match self {
             DownloadProtocol::Http => "http",
             DownloadProtocol::Torrent => "torrent",
+            DownloadProtocol::Video => "video",
         }
     }
 
     pub fn from_str(s: &str) -> Self {
         match s {
             "torrent" => DownloadProtocol::Torrent,
+            "video" => DownloadProtocol::Video,
             _ => DownloadProtocol::Http,
         }
     }
@@ -82,13 +85,14 @@ pub struct Download {
     pub size: i64,
     pub downloaded: i64,
     pub status: DownloadStatus,
-    pub protocol: DownloadProtocol, // Added protocol
+    pub protocol: DownloadProtocol,
     pub speed: i64,
     pub connections: i32,
     pub created_at: String,
     pub completed_at: Option<String>,
     pub error_message: Option<String>,
-    pub info_hash: Option<String>, // Added for torrents
+    pub info_hash: Option<String>,
+    pub metadata: Option<String>,
 }
 
 /// Initialize the database with schema
@@ -112,7 +116,8 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             created_at TEXT NOT NULL,
             completed_at TEXT,
             error_message TEXT,
-            info_hash TEXT
+            info_hash TEXT,
+            metadata TEXT
         );
 
         -- Settings table (key-value store)
@@ -156,9 +161,33 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('auto_start', 'true'),
             ('notifications', 'true'),
             ('speed_limit', '0'),
+            ('autocatch_enabled', 'true'),
             ('theme', 'dark');
         ",
     )?;
+
+    // Migration: Add metadata column to downloads table if it doesn't exist
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(downloads)")?;
+        let columns = stmt.query_map([], |row| {
+            let name: String = row.get(1)?;
+            Ok(name)
+        })?;
+
+        let mut has_metadata = false;
+        for col in columns {
+            if let Ok(name) = col {
+                if name == "metadata" {
+                    has_metadata = true;
+                    break;
+                }
+            }
+        }
+
+        if !has_metadata {
+            conn.execute("ALTER TABLE downloads ADD COLUMN metadata TEXT", [])?;
+        }
+    }
 
     Ok(())
 }
@@ -167,7 +196,7 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
 pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash 
+        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata 
          FROM downloads 
          ORDER BY created_at DESC",
     )?;
@@ -189,6 +218,7 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
                 completed_at: row.get(11)?,
                 error_message: row.get(12)?,
                 info_hash: row.get(13)?,
+                metadata: row.get(14)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -200,7 +230,7 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
 pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash 
+        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata 
          FROM downloads 
          WHERE status = 'completed'
          ORDER BY completed_at DESC",
@@ -223,6 +253,7 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
                 completed_at: row.get(11)?,
                 error_message: row.get(12)?,
                 info_hash: row.get(13)?,
+                metadata: row.get(14)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -234,8 +265,8 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
 pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> SqliteResult<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "INSERT INTO downloads (id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO downloads (id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         (
             &download.id,
             &download.url,
@@ -251,6 +282,7 @@ pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> Sqlit
             &download.completed_at,
             &download.error_message,
             &download.info_hash,
+            &download.metadata,
         ),
     )?;
     Ok(())

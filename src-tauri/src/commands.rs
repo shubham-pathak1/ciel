@@ -250,6 +250,7 @@ pub async fn add_download(
         completed_at: None,
         error_message: None,
         info_hash: None,
+        metadata: None,
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
@@ -300,7 +301,8 @@ pub async fn add_torrent(
         created_at: chrono::Utc::now().to_rfc3339(),
         completed_at: None,
         error_message: None,
-        info_hash: None, 
+        info_hash: None,
+        metadata: None,
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
@@ -469,10 +471,16 @@ pub async fn resume_download(
     db::update_download_status(&db_state.path, &id, DownloadStatus::Downloading).map_err(|e| e.to_string())?;
     db::log_event(&db_state.path, &id, "resumed", None).ok();
 
-    if download.protocol == DownloadProtocol::Torrent {
-        torrent_manager.resume_torrent(&id).await?;
-    } else {
-        start_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
+    match download.protocol {
+        DownloadProtocol::Torrent => {
+            torrent_manager.resume_torrent(&id).await?;
+        }
+        DownloadProtocol::Video => {
+            crate::video::start_video_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
+        }
+        _ => {
+            start_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
+        }
     }
 
     Ok(())
@@ -523,22 +531,31 @@ pub fn show_in_folder(path: String) -> Result<(), String> {
     {
         let path_norm = path.replace("/", "\\");
         let p = Path::new(&path_norm);
-        println!("Opening folder for: {}", path_norm);
+        println!("Opening: {}", path_norm);
         
         if p.exists() {
-            // If file exists, try to select it
-            let _ = std::process::Command::new("explorer.exe")
-                .arg(format!("/select,{}", path_norm))
-                .spawn();
+            if p.is_dir() {
+                // If it's a directory, just open it
+                let _ = std::process::Command::new("explorer.exe")
+                    .arg(&path_norm)
+                    .spawn();
+            } else {
+                // If it's a file, select it in its parent folder
+                let _ = std::process::Command::new("explorer.exe")
+                    .arg(format!("/select,\"{}\"", path_norm))
+                    .spawn();
+            }
         } else {
-            // If the specific file doesn't exist, try opening its parent directory
-            if let Some(parent) = p.parent() {
+            // If the specific file doesn't exist (e.g. download in progress),
+            // try opening its parent directory
+            let parent = p.parent().unwrap_or_else(|| Path::new("C:\\"));
+            if parent.exists() {
                 println!("File not found, opening parent: {:?}", parent);
                 let _ = std::process::Command::new("explorer.exe")
                     .arg(parent)
                     .spawn();
             } else {
-                // Last ditch effort: open current dir if parent is somehow missing
+                // Last ditch: open current dir
                 let _ = std::process::Command::new("explorer.exe")
                     .arg(".")
                     .spawn();

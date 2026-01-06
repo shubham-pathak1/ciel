@@ -11,6 +11,7 @@ interface SettingsState {
     auto_resume: string;
     theme: string;
     ask_location: string;
+    autocatch_enabled: string;
 }
 
 export function Settings() {
@@ -20,6 +21,7 @@ export function Settings() {
         auto_resume: "true",
         theme: "dark",
         ask_location: "false",
+        autocatch_enabled: "true",
     });
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
@@ -39,6 +41,7 @@ export function Settings() {
                 auto_resume: result.auto_resume || "true",
                 theme: result.theme || "dark",
                 ask_location: result.ask_location || "false",
+                autocatch_enabled: result.autocatch_enabled || "true",
             });
 
             // Check for active downloads
@@ -196,10 +199,29 @@ export function Settings() {
                         </div>
                     </div>
                 );
-
-
-            // ... inside the component ...
-
+            case "privacy":
+                return (
+                    <div className="space-y-8 animate-fade-in">
+                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
+                            <div>
+                                <h4 className="text-base font-medium text-text-primary mb-1">Autocatch (Clipboard)</h4>
+                                <p className="text-xs text-text-tertiary">Automatically detect and prompt for URLs in your clipboard.</p>
+                            </div>
+                            <button
+                                onClick={() => handleChange("autocatch_enabled", settings.autocatch_enabled === "true" ? "false" : "true")}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
+                                    settings.autocatch_enabled === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                )}
+                            >
+                                <div className={clsx(
+                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
+                                    settings.autocatch_enabled === "true" ? 'translate-x-7' : 'translate-x-1'
+                                )} />
+                            </button>
+                        </div>
+                    </div>
+                );
             case "about":
                 return (
                     <div className="space-y-8 text-center py-8 animate-fade-in">

@@ -33,6 +33,7 @@ percent-encoding = "2"
 regex = "1"
 zip = "7.0.0"
 flate2 = "1.1.5"
+arboard = "3"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.5"
