@@ -48,7 +48,6 @@ pub struct UrlTypeInfo {
     is_magnet: bool,
     content_type: Option<String>,
     content_length: Option<u64>,
-    resolved_url: Option<String>,
     hinted_filename: Option<String>,
 }
 
@@ -59,7 +58,6 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
             is_magnet: true,
             content_type: None,
             content_length: None,
-            resolved_url: None,
             hinted_filename: None,
         });
     }
@@ -69,26 +67,11 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
         .build()
         .unwrap_or_default();
 
-    let mut final_url = url.clone();
-    let mut resolved_link = None;
-
-    // Smart Google Drive Resolution
-    if let Some(resolved) = resolve_google_drive_link(&client, &url).await {
-        final_url = resolved.clone();
-        resolved_link = Some(resolved);
-    }
-
-    // If it's Drive, we MUST use GET because HEAD often returns 405/403 on the confirmation URL
-    // For other servers, we also use GET with Range header because HEAD often doesn't include Content-Disposition
-    let response = if resolved_link.is_some() {
-        client.get(&final_url).send().await.map_err(|e| e.to_string())?
-    } else {
-        // Use GET with Range: bytes=0-0 to get headers (including Content-Disposition) without downloading
-        client.get(&final_url)
-            .header("Range", "bytes=0-0")
-            .send().await
-            .map_err(|e| e.to_string())?
-    };
+    // Use GET with Range: bytes=0-0 to get headers (including Content-Disposition) without downloading
+    let response = client.get(&url)
+        .header("Range", "bytes=0-0")
+        .send().await
+        .map_err(|e| e.to_string())?;
     
     let headers = response.headers();
     let mut content_type = headers.get(reqwest::header::CONTENT_TYPE)
@@ -99,7 +82,7 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok());
 
-    let mut hinted_filename = headers.get(reqwest::header::CONTENT_DISPOSITION)
+    let hinted_filename = headers.get(reqwest::header::CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| {
             // First try RFC 5987 format: filename*=CHARSET''... (e.g., UTF-8, ISO-8859-1, etc.)
@@ -120,25 +103,9 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
             caps.get(1).or(caps.get(2)).map(|m| m.as_str().to_string())
         });
 
-    // Fallback: If it's a Drive link and filename is missing or generic (like 'view.html')
-    // we can scrape the <title> tag from the confirmation page.
-    if resolved_link.is_some() && (hinted_filename.is_none() || hinted_filename.as_deref() == Some("view.html")) {
-        if let Ok(text) = response.text().await {
-            let title_re = regex::Regex::new(r"(?i)<title>(.*?)</title>").ok();
-            if let Some(caps) = title_re.and_then(|re| re.captures(&text)) {
-                let mut title = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-                // Drive Titles are often "Filename - Google Drive"
-                title = title.replace(" - Google Drive", "").trim().to_string();
-                if !title.is_empty() && !title.contains("Google Drive") && !title.contains("Virus scan warning") {
-                    hinted_filename = Some(title);
-                }
-            }
-        }
-    }
-
     // If content-type is generic or missing, try to sniff magic bytes
     if content_type.as_deref().map_or(true, |ct| ct == "application/octet-stream" || ct == "application/x-zip-compressed") {
-        if let Ok(range_res) = client.get(&final_url).header("Range", "bytes=0-3").send().await {
+        if let Ok(range_res) = client.get(&url).header("Range", "bytes=0-3").send().await {
             if let Ok(bytes) = range_res.bytes().await {
                 if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b && bytes[2] == 0x03 && bytes[3] == 0x04 {
                     content_type = Some("application/zip".to_string());
@@ -151,38 +118,8 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
         is_magnet: false,
         content_type,
         content_length,
-        resolved_url: resolved_link,
         hinted_filename,
     })
-}
-
-/// Helper to resolve Google Drive links into direct download links
-async fn resolve_google_drive_link(client: &reqwest::Client, url: &str) -> Option<String> {
-    if !url.contains("drive.google.com") {
-        return None;
-    }
-
-    // Extract file ID using regex
-    // Formats: /file/d/ID/..., /id=ID, /open?id=ID
-    let id_regex = regex::Regex::new(r"/(?:file/d/|id=|open\?id=)([a-zA-Z0-9_-]{25,})").ok()?;
-    let caps = id_regex.captures(url)?;
-    let file_id = caps.get(1)?.as_str();
-
-    let direct_url = format!("https://drive.google.com/uc?export=download&id={}", file_id);
-
-    // Some files (large ones) require a confirmation token
-    if let Ok(res) = client.get(&direct_url).send().await {
-        let text = res.text().await.unwrap_or_default();
-        
-        // Look for the "confirm" token in the HTML (usually in a form or link)
-        let confirm_regex = regex::Regex::new(r#"confirm=([a-zA-Z0-9_-]+)"#).ok()?;
-        if let Some(confirm_caps) = confirm_regex.captures(&text) {
-            let token = confirm_caps.get(1)?.as_str();
-            return Some(format!("{}&confirm={}", direct_url, token));
-        }
-    }
-
-    Some(direct_url)
 }
 
 /// Helper to resolve authentic filepath

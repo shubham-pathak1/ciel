@@ -1,2 +1,0 @@
-    Checking ciel v0.1.0 (D:\projects\ciel\src-tauri)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.32s

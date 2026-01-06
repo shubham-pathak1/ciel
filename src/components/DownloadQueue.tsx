@@ -434,7 +434,6 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
                 is_magnet: boolean;
                 content_type: string | null;
                 content_length: number | null;
-                resolved_url: string | null;
                 hinted_filename: string | null;
             }
 

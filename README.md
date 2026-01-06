@@ -20,7 +20,6 @@
 ### Downloads
 - **Multi-Connection HTTP Engine**: High-speed parallel downloads with automatic retry
 - **Smart Filename Extraction**: RFC 5987 compliant parsing of `Content-Disposition` headers
-- **Google Drive Resolution**: Automatically resolves Drive links and bypasses virus scan confirmations
 - **Configurable Download Location**: Choose default folder or ask every time
 
 ### Torrents
