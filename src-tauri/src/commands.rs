@@ -7,22 +7,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-use crate::torrent::TorrentFile;
-use reqwest::header::RANGE;
-use std::convert::TryInto;
-use serde::Serialize;
-use flate2::read::DeflateDecoder;
-use std::io::Read;
-use std::fs::File;
-use std::io::Write;
 
-#[derive(Serialize)]
-pub struct ZipPreviewInfo {
-    pub id: String,
-    pub name: String,
-    pub total_size: u64,
-    pub files: Vec<TorrentFile>,
-}
 
 
 /// Manager for active downloads
@@ -94,14 +79,19 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
     }
 
     // If it's Drive, we MUST use GET because HEAD often returns 405/403 on the confirmation URL
+    // For other servers, we also use GET with Range header because HEAD often doesn't include Content-Disposition
     let response = if resolved_link.is_some() {
         client.get(&final_url).send().await.map_err(|e| e.to_string())?
     } else {
-        client.head(&final_url).send().await.map_err(|e| e.to_string())?
+        // Use GET with Range: bytes=0-0 to get headers (including Content-Disposition) without downloading
+        client.get(&final_url)
+            .header("Range", "bytes=0-0")
+            .send().await
+            .map_err(|e| e.to_string())?
     };
     
     let headers = response.headers();
-    let content_type = headers.get(reqwest::header::CONTENT_TYPE)
+    let mut content_type = headers.get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
         
@@ -112,8 +102,20 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
     let mut hinted_filename = headers.get(reqwest::header::CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| {
-            // Extract filename from "attachment; filename=\"...\""
-            let re = regex::Regex::new(r#"filename\s*=\s*(?:"([^"]+)"|([^;]+))"#).ok()?;
+            // First try RFC 5987 format: filename*=CHARSET''... (e.g., UTF-8, ISO-8859-1, etc.)
+            // The format is: filename*=<charset>'<language>'<encoded-value>
+            if let Some(re) = regex::Regex::new(r"(?i)filename\*\s*=\s*([^']+)'[^']*'([^;\s]+)").ok() {
+                if let Some(caps) = re.captures(s) {
+                    if let Some(m) = caps.get(2) {
+                        // URL decode the filename (works for any charset, decoded as UTF-8 lossy)
+                        return Some(percent_encoding::percent_decode_str(m.as_str())
+                            .decode_utf8_lossy()
+                            .to_string());
+                    }
+                }
+            }
+            // Fallback: try simple filename="..." or filename=...
+            let re = regex::Regex::new(r#"filename\s*=\s*(?:"([^"]+)"|([^;\s]+))"#).ok()?;
             let caps = re.captures(s)?;
             caps.get(1).or(caps.get(2)).map(|m| m.as_str().to_string())
         });
@@ -129,6 +131,17 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
                 title = title.replace(" - Google Drive", "").trim().to_string();
                 if !title.is_empty() && !title.contains("Google Drive") && !title.contains("Virus scan warning") {
                     hinted_filename = Some(title);
+                }
+            }
+        }
+    }
+
+    // If content-type is generic or missing, try to sniff magic bytes
+    if content_type.as_deref().map_or(true, |ct| ct == "application/octet-stream" || ct == "application/x-zip-compressed") {
+        if let Ok(range_res) = client.get(&final_url).header("Range", "bytes=0-3").send().await {
+            if let Ok(bytes) = range_res.bytes().await {
+                if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b && bytes[2] == 0x03 && bytes[3] == 0x04 {
+                    content_type = Some("application/zip".to_string());
                 }
             }
         }
@@ -386,278 +399,6 @@ pub async fn start_selective_torrent(
     indices: Vec<usize>,
 ) -> Result<(), String> {
     torrent_manager.start_selective(&id, indices).await
-}
-
-/// Preview ZIP contents without full download
-#[tauri::command]
-pub async fn preview_zip(url: String) -> Result<ZipPreviewInfo, String> {
-    let client = reqwest::Client::new();
-
-    // 1. Get Content-Length
-    let head_resp = client.head(&url).send().await
-        .map_err(|e| format!("Failed to HEAD url: {}", e))?;
-    
-    let content_len = head_resp.content_length()
-        .ok_or("Server did not report Content-Length")?;
-
-    // 2. Fetch Tail (End of Central Directory)
-    // EOCD is min 22 bytes. Comment can be up to 65535 bytes.
-    // Safe bet: last 65536 + 22 bytes, or full file if smaller.
-    let tail_size = 65557.min(content_len);
-    let start_range = content_len - tail_size;
-    
-    let tail_resp = client.get(&url)
-        .header(RANGE, format!("bytes={}-{}", start_range, content_len - 1))
-        .send().await
-        .map_err(|e| format!("Failed to fetch tail: {}", e))?;
-
-    let tail_bytes = tail_resp.bytes().await
-        .map_err(|e| format!("Failed to read tail bytes: {}", e))?;
-
-    // 3. Find EOCD Signature: 0x06054b50
-    // Scan backwards
-    let mut eocd_offset_in_tail = None;
-    for i in (0..tail_bytes.len().saturating_sub(3)).rev() {
-        if tail_bytes[i] == 0x50 && tail_bytes[i+1] == 0x4b && tail_bytes[i+2] == 0x05 && tail_bytes[i+3] == 0x06 {
-            eocd_offset_in_tail = Some(i);
-            break;
-        }
-    }
-
-    let eocd_idx = eocd_offset_in_tail.ok_or("Not a valid ZIP (EOCD not found)")?;
-
-    // Check valid EOCD
-    if tail_bytes.len() < eocd_idx + 22 {
-        return Err("Truncated EOCD".to_string());
-    }
-
-    // Parse EOCD (Little Endian)
-    // Offset 10 (2 bytes): Total entries
-    // Offset 12 (4 bytes): Size of CD
-    // Offset 16 (4 bytes): Offset of CD
-    
-    let cd_size = u32::from_le_bytes(tail_bytes[eocd_idx+12..eocd_idx+16].try_into().unwrap()) as u64;
-    let cd_offset = u32::from_le_bytes(tail_bytes[eocd_idx+16..eocd_idx+20].try_into().unwrap()) as u64;
-
-    // TODO: Support Zip64 if cd_size/offset are 0xFFFFFFFF
-    if cd_size == 0xFFFFFFFF || cd_offset == 0xFFFFFFFF {
-        return Err("Zip64 not yet supported for remote preview".to_string());
-    }
-
-    // 4. Fetch Central Directory
-    // Note: cd_offset is absolute from start of file.
-    let cd_bytes = if cd_offset >= start_range && (cd_offset + cd_size) <= content_len {
-        // CD is already in our tail buffer!
-        let start_in_tail = (cd_offset - start_range) as usize;
-        let end_in_tail = (cd_offset - start_range + cd_size) as usize;
-        if end_in_tail > tail_bytes.len() {
-             return Err("Central Directory bounds error in tail".to_string());
-        }
-        tail_bytes.slice(start_in_tail..end_in_tail)
-    } else {
-        // Need to fetch CD separately
-        let cd_resp = client.get(&url)
-            .header(RANGE, format!("bytes={}-{}", cd_offset, cd_offset + cd_size - 1))
-            .send().await
-            .map_err(|e| format!("Failed to fetch Central Directory: {}", e))?;
-        
-        cd_resp.bytes().await
-            .map_err(|e| format!("Failed to read CD bytes: {}", e))?
-    };
-
-    // 5. Parse Central Directory Entries
-    let mut files = Vec::new();
-    let mut cursor = 0;
-    let mut index = 0;
-
-    // CD Signature: 0x02014b50
-    while cursor + 46 <= cd_bytes.len() {
-        if cd_bytes[cursor] != 0x50 || cd_bytes[cursor+1] != 0x4b || cd_bytes[cursor+2] != 0x01 || cd_bytes[cursor+3] != 0x02 {
-            break; // End of CD headers or invalid
-        }
-
-        // Offset 20: Compressed size (4)
-        // Offset 24: Uncompressed size (4)
-        // Offset 28: Filename len (2)
-        // Offset 30: Extra len (2)
-        // Offset 32: Comment len (2)
-        
-        let uncompressed_size = u32::from_le_bytes(cd_bytes[cursor+24..cursor+28].try_into().unwrap()) as u64;
-        let filename_len = u16::from_le_bytes(cd_bytes[cursor+28..cursor+30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd_bytes[cursor+30..cursor+32].try_into().unwrap()) as usize;
-        let comment_len = u16::from_le_bytes(cd_bytes[cursor+32..cursor+34].try_into().unwrap()) as usize;
-
-        let filename_start = cursor + 46;
-        if filename_start + filename_len > cd_bytes.len() {
-            files.push(TorrentFile {
-                name: "Truncated Filename".to_string(),
-                size: uncompressed_size,
-                index,
-            });
-            break; 
-        }
-
-        let filename_bytes = &cd_bytes[filename_start..filename_start+filename_len];
-        let filename = String::from_utf8_lossy(filename_bytes).to_string();
-
-        files.push(TorrentFile {
-            name: filename,
-            size: uncompressed_size,
-            index,
-        });
-
-        index += 1;
-        cursor = filename_start + filename_len + extra_len + comment_len;
-    }
-
-    // Attempt to extract filename from URL or header? For info name.
-    let url_parsed = url::Url::parse(&url).map_err(|_| "Invalid URL")?;
-    let display_name = url_parsed.path_segments()
-        .and_then(|s| s.last())
-        .map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().to_string())
-        .unwrap_or("archive.zip".to_string());
-
-    Ok(ZipPreviewInfo {
-        id: "zip_preview".to_string(), 
-        name: display_name,
-        total_size: content_len,
-        files,
-    })
-}
-
-#[tauri::command]
-pub async fn download_zip_selection(
-    app: AppHandle,
-    url: String,
-    indices: Vec<usize>,
-    output_folder: Option<String>,
-) -> Result<(), String> {
-    let client = reqwest::Client::new();
-
-    // Resolve output folder
-    let target_dir = if let Some(f) = output_folder {
-        PathBuf::from(f)
-    } else {
-        app.path().download_dir().map_err(|e| e.to_string())?
-    };
-    let output_folder_str = target_dir.to_string_lossy().to_string();
-
-    // 1. Get Content-Length
-    let head_resp = client.head(&url).send().await
-        .map_err(|e| format!("Failed to HEAD url: {}", e))?;
-    let content_len = head_resp.content_length()
-        .ok_or("Server did not report Content-Length")?;
-
-    // 2. Fetch Tail to parse CD (Same logic as preview, could be shared but dup for now)
-    let tail_size = 65557.min(content_len);
-    let start_range = content_len - tail_size;
-    let tail_resp = client.get(&url)
-        .header(RANGE, format!("bytes={}-{}", start_range, content_len - 1))
-        .send().await
-        .map_err(|e| format!("Failed to fetch tail: {}", e))?;
-    let tail_bytes = tail_resp.bytes().await
-        .map_err(|e| format!("Failed to read tail bytes: {}", e))?;
-
-    let mut eocd_offset_in_tail = None;
-    for i in (0..tail_bytes.len().saturating_sub(3)).rev() {
-        if tail_bytes[i] == 0x50 && tail_bytes[i+1] == 0x4b && tail_bytes[i+2] == 0x05 && tail_bytes[i+3] == 0x06 {
-            eocd_offset_in_tail = Some(i);
-            break;
-        }
-    }
-    let eocd_idx = eocd_offset_in_tail.ok_or("Not a valid ZIP (EOCD not found)")?;
-    
-    let cd_size = u32::from_le_bytes(tail_bytes[eocd_idx+12..eocd_idx+16].try_into().unwrap()) as u64;
-    let cd_offset = u32::from_le_bytes(tail_bytes[eocd_idx+16..eocd_idx+20].try_into().unwrap()) as u64;
-
-    let cd_bytes = if cd_offset >= start_range && (cd_offset + cd_size) <= content_len {
-        let start_in_tail = (cd_offset - start_range) as usize;
-        let end_in_tail = (cd_offset - start_range + cd_size) as usize;
-        tail_bytes.slice(start_in_tail..end_in_tail)
-    } else {
-        let cd_resp = client.get(&url)
-            .header(RANGE, format!("bytes={}-{}", cd_offset, cd_offset + cd_size - 1))
-            .send().await
-            .map_err(|e| format!("Failed to fetch Central Directory: {}", e))?;
-        cd_resp.bytes().await.map_err(|e| format!("Failed to read CD: {}", e))?
-    };
-
-    // 3. Process Selected Files
-    let mut cursor = 0;
-    let mut current_index = 0;
-
-    while cursor + 46 <= cd_bytes.len() {
-        if cd_bytes[cursor] != 0x50 || cd_bytes[cursor+1] != 0x4b || cd_bytes[cursor+2] != 0x01 || cd_bytes[cursor+3] != 0x02 {
-            break; 
-        }
-
-        let compression_method = u16::from_le_bytes(cd_bytes[cursor+10..cursor+12].try_into().unwrap());
-        let compressed_size = u32::from_le_bytes(cd_bytes[cursor+20..cursor+24].try_into().unwrap()) as u64;
-        let filename_len = u16::from_le_bytes(cd_bytes[cursor+28..cursor+30].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(cd_bytes[cursor+30..cursor+32].try_into().unwrap()) as usize;
-        let comment_len = u16::from_le_bytes(cd_bytes[cursor+32..cursor+34].try_into().unwrap()) as usize;
-        let local_header_offset = u32::from_le_bytes(cd_bytes[cursor+42..cursor+46].try_into().unwrap()) as u64;
-
-        let filename_start = cursor + 46;
-        let filename = String::from_utf8_lossy(&cd_bytes[filename_start..filename_start+filename_len]).to_string();
-
-        if indices.contains(&current_index) {
-            // Process this file
-            if compression_method != 0 && compression_method != 8 {
-                 println!(" Skipping {} - unsupported compression {}", filename, compression_method);
-            } else {
-                 // Fetch Local File Header to find actual data start
-                 // LFH is 30 bytes + filename + extra
-                 let lfh_resp = client.get(&url)
-                    .header(RANGE, format!("bytes={}-{}", local_header_offset, local_header_offset + 30 + 1024)) // Fetch enough for headers
-                    .send().await
-                    .map_err(|e| format!("Failed to fetch LFH: {}", e))?;
-                let lfh_bytes = lfh_resp.bytes().await.map_err(|e| format!("Failed to read LFH: {}", e))?;
-
-                if lfh_bytes[0] != 0x50 || lfh_bytes[1] != 0x4b || lfh_bytes[2] != 0x03 || lfh_bytes[3] != 0x04 {
-                    return Err(format!("Invalid LFH for {}", filename));
-                }
-                
-                let lfh_filename_len = u16::from_le_bytes(lfh_bytes[26..28].try_into().unwrap()) as u64;
-                let lfh_extra_len = u16::from_le_bytes(lfh_bytes[28..30].try_into().unwrap()) as u64;
-                
-                let data_start = local_header_offset + 30 + lfh_filename_len + lfh_extra_len;
-                
-                // Fetch Compressed Data
-                let data_resp = client.get(&url)
-                    .header(RANGE, format!("bytes={}-{}", data_start, data_start + compressed_size - 1))
-                    .send().await
-                    .map_err(|e| format!("Failed to fetch data for {}: {}", filename, e))?;
-                
-                // Stream response to file
-                let content = data_resp.bytes().await.map_err(|e| format!("Failed to download content: {}", e))?;
-                
-                // Write output
-                let out_path = Path::new(&output_folder_str).join(&filename);
-                if let Some(parent) = out_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-
-                let mut out_file = File::create(&out_path).map_err(|e| format!("Failed to create file: {}", e))?;
-
-                if compression_method == 8 {
-                    // Deflate
-                    let mut decoder = DeflateDecoder::new(&content[..]);
-                    let mut buffer = Vec::new(); // Memory heavy for large files, but OK for MVP
-                    decoder.read_to_end(&mut buffer).map_err(|e| format!("Decompression failed: {}", e))?;
-                    out_file.write_all(&buffer).map_err(|e| format!("Write failed: {}", e))?;
-                } else {
-                    // Store
-                    out_file.write_all(&content).map_err(|e| format!("Write failed: {}", e))?;
-                }
-            }
-        }
-
-        current_index += 1;
-        cursor = filename_start + filename_len + extra_len + comment_len;
-    }
-
-    Ok(())
 }
 
 /// Helper function to start the background download task

@@ -413,7 +413,6 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
     const [isAdding, setIsAdding] = useState(false);
     const [status, setStatus] = useState<string | null>(null);
     const [torrentInfo, setTorrentInfo] = useState<TorrentInfo | null>(null);
-    const [isZipPreview, setIsZipPreview] = useState(false); // Merged feature
 
     const handleAdd = async () => {
         if (!url) return;
@@ -435,6 +434,8 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
                 is_magnet: boolean;
                 content_type: string | null;
                 content_length: number | null;
+                resolved_url: string | null;
+                hinted_filename: string | null;
             }
 
             const typeInfo = await invoke<UrlTypeInfo>("validate_url_type", { url });
@@ -445,26 +446,6 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
                 setStatus(null);
                 setTorrentInfo(info);
             } else {
-                // Smart ZIP Preview Logic Check
-                let isArchive = false;
-                const lowerUrl = url.toLowerCase();
-                if (lowerUrl.endsWith('.zip') || lowerUrl.endsWith('.jar') || lowerUrl.endsWith('.7z')) isArchive = true;
-                if (typeInfo.content_type?.includes('zip') || typeInfo.content_type?.includes('java-archive')) isArchive = true;
-
-                if (isArchive) {
-                    try {
-                        setStatus("Inspecting archive...");
-                        const info = await invoke<TorrentInfo>("preview_zip", { url });
-                        setTorrentInfo(info);
-                        setIsZipPreview(true);
-                        setStatus(null);
-                        setIsAdding(false);
-                        return;
-                    } catch (e) {
-                        console.warn("Smart preview failed, falling back to standard download", e);
-                    }
-                }
-
                 // Check if it's a webpage
                 if (typeInfo.content_type?.includes("text/html")) {
                     // Note: window.confirm might be blocked in some Tauri contexts, but user code used it.
@@ -482,24 +463,28 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
                     }
                 }
 
-                // Regular download logic
-                let filename = "download";
-                try {
-                    const urlObj = new URL(url);
-                    const pathSegments = urlObj.pathname.split('/');
-                    const lastSegment = pathSegments[pathSegments.length - 1];
-                    if (lastSegment) filename = decodeURIComponent(lastSegment).split('?')[0];
-                    filename = filename.replace(/[<>:"/\\|?*]/g, '_');
+                // Use server-provided filename if available, otherwise extract from URL
+                let filename = typeInfo.hinted_filename || "download";
 
-                    // Add extension if missing and we know content-type
-                    if (!filename.includes('.')) {
-                        if (typeInfo.content_type?.includes('html')) filename += '.html';
-                        else if (typeInfo.content_type?.includes('pdf')) filename += '.pdf';
-                        else if (typeInfo.content_type?.includes('zip')) filename += '.zip';
+                if (!typeInfo.hinted_filename) {
+                    try {
+                        const urlObj = new URL(url);
+                        const pathSegments = urlObj.pathname.split('/');
+                        const lastSegment = pathSegments[pathSegments.length - 1];
+                        if (lastSegment) filename = decodeURIComponent(lastSegment).split('?')[0];
+                        filename = filename.replace(/[<>:"/\\|?*]/g, '_');
+
+                        // Add extension if missing and we know content-type
+                        if (!filename.includes('.')) {
+                            if (typeInfo.content_type?.includes('html')) filename += '.html';
+                            else if (typeInfo.content_type?.includes('pdf')) filename += '.pdf';
+                            else if (typeInfo.content_type?.includes('zip')) filename += '.zip';
+                        }
+                    } catch (e) {
+                        filename = "download_file";
                     }
-                } catch (e) {
-                    filename = "download_file";
                 }
+
                 if (!filename || filename.trim() === "") filename = "download";
 
                 await invoke("add_download", { url, filename, filepath: "" });
@@ -517,21 +502,13 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
     const handleTorrentSelect = async (indices: number[]) => {
         setIsAdding(true);
         try {
-            if (isZipPreview) {
-                await invoke("download_zip_selection", {
-                    url: url,
-                    indices,
-                    outputFolder: null
-                });
-            } else {
-                // Now add the torrent with selection
-                await invoke("add_torrent", {
-                    url,
-                    filename: torrentInfo?.name || "Torrent Download",
-                    filepath: "",
-                    indices
-                });
-            }
+            // Add the torrent with selection
+            await invoke("add_torrent", {
+                url,
+                filename: torrentInfo?.name || "Torrent Download",
+                filepath: "",
+                indices
+            });
             onAdded();
             onClose();
         } catch (err) {
@@ -605,7 +582,6 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
                         onSelect={handleTorrentSelect}
                         onCancel={() => {
                             setTorrentInfo(null);
-                            setIsZipPreview(false);
                             setIsAdding(false);
                         }}
                     />
