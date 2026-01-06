@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { X, Check, File, Database } from 'lucide-react';
 import { clsx } from 'clsx';
+import { motion } from 'framer-motion';
 
 interface TorrentFile {
     name: string;
@@ -58,8 +59,14 @@ export const TorrentFileSelector: React.FC<Props> = ({ info, onSelect, onCancel 
     }, [selectedIndices, info.files]);
 
     return (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/60 backdrop-blur-md animate-fade-in text-left">
-            <div className="bg-brand-secondary border border-surface-border w-full max-w-2xl rounded-xl shadow-2xl flex flex-col max-h-[80vh] overflow-hidden">
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/60 backdrop-blur-md text-left">
+            <motion.div
+                initial={{ opacity: 0, scale: 0.98, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.98, y: 5 }}
+                transition={{ duration: 0.15, ease: "easeOut" }}
+                className="bg-brand-secondary border border-surface-border w-full max-w-2xl rounded-xl shadow-2xl flex flex-col max-h-[80vh] overflow-hidden"
+            >
                 {/* Header */}
                 <div className="p-4 border-b border-surface-border flex items-center justify-between bg-surface-primary/30">
                     <div>
@@ -147,7 +154,7 @@ export const TorrentFileSelector: React.FC<Props> = ({ info, onSelect, onCancel 
                         </button>
                     </div>
                 </div>
-            </div>
+            </motion.div>
         </div>
     );
 };

@@ -5,6 +5,7 @@ import {
     Settings as SettingsIcon,
 } from "lucide-react";
 import clsx from "clsx";
+import { motion } from "framer-motion";
 
 type View = "downloads" | "active" | "completed" | "settings";
 
@@ -37,17 +38,24 @@ export function Sidebar({ currentView, onViewChange }: SidebarProps) {
                         const isActive = currentView === item.id;
 
                         return (
-                            <li key={item.id}>
+                            <li key={item.id} className="relative">
                                 <button
                                     onClick={() => onViewChange(item.id)}
                                     className={clsx(
-                                        "w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 text-sm",
+                                        "w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 text-sm relative z-10",
                                         isActive
-                                            ? "bg-brand-tertiary text-text-primary font-medium"
-                                            : "text-text-secondary hover:bg-brand-tertiary/50 hover:text-text-primary"
+                                            ? "text-text-primary font-medium"
+                                            : "text-text-secondary hover:text-text-primary"
                                     )}
                                 >
-                                    <Icon size={18} className={isActive ? "text-text-primary" : "text-text-tertiary group-hover:text-text-primary"} />
+                                    {isActive && (
+                                        <motion.div
+                                            layoutId="active-pill"
+                                            className="absolute inset-0 bg-brand-tertiary rounded-lg z-[-1]"
+                                            transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                                        />
+                                    )}
+                                    <Icon size={18} className={isActive ? "text-text-primary" : "text-text-tertiary"} />
                                     <span>{item.label}</span>
                                 </button>
                             </li>

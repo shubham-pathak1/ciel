@@ -1,13 +1,15 @@
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::io::{Seek, SeekFrom, Write, Read};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use sha2::{Sha256, Digest};
 use std::fs::File;
+use std::io::Read;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio::io::{AsyncWriteExt, AsyncSeekExt, BufWriter};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Download engine errors
 #[derive(Error, Debug, Clone, Serialize)]
@@ -107,15 +109,16 @@ struct WorkChunk {
 pub struct Downloader {
     client: Client,
     config: DownloadConfig,
-    progress: Arc<Mutex<DownloadProgress>>,
+    progress: Arc<std::sync::Mutex<DownloadProgress>>,
+    downloaded_atomic: Arc<AtomicU64>,
     db_path: Option<String>,
     cancel_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
-    last_emit: Arc<std::sync::atomic::AtomicU64>,
+    last_emit: Arc<AtomicU64>,
 }
 
 impl Downloader {
     pub fn new(config: DownloadConfig) -> Self {
-        let progress = Arc::new(Mutex::new(DownloadProgress {
+        let progress = Arc::new(std::sync::Mutex::new(DownloadProgress {
             id: config.id.clone(),
             total: 0,
             downloaded: 0,
@@ -126,6 +129,7 @@ impl Downloader {
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .tcp_nodelay(true)
             .build()
             .unwrap_or_default();
 
@@ -133,9 +137,10 @@ impl Downloader {
             client,
             config,
             progress,
+            downloaded_atomic: Arc::new(AtomicU64::new(0)),
             db_path: None,
             cancel_signal: None,
-            last_emit: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_emit: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -144,7 +149,7 @@ impl Downloader {
         self
     }
 
-    pub fn get_progress(&self) -> Arc<Mutex<DownloadProgress>> {
+    pub fn get_progress(&self) -> Arc<std::sync::Mutex<DownloadProgress>> {
         self.progress.clone()
     }
 
@@ -211,8 +216,8 @@ impl Downloader {
         // If no chunks, calculate them
         if chunks.is_empty() {
             let connections = self.config.connections as u64;
-            // Use more chunks than workers for better distribution if scaling
-            let num_chunks = connections * 2; 
+            // Use even more chunks than workers for better distribution (8x)
+            let num_chunks = connections * 8; 
             let chunk_size = total_size / num_chunks;
             let mut db_chunks_to_insert = Vec::new();
 
@@ -243,217 +248,223 @@ impl Downloader {
         }
 
         let total_downloaded = chunks.iter().map(|c| c.downloaded).sum();
+        self.downloaded_atomic.store(total_downloaded, Ordering::SeqCst);
         {
             let mut p = self.progress.lock().unwrap();
             p.downloaded = total_downloaded;
         }
 
-        // State for dynamic scaling
-        let pending_chunks = Arc::new(Mutex::new(chunks.into_iter().filter(|c| c.downloaded < (c.end - c.start + 1)).collect::<Vec<_>>()));
-        let active_workers = Arc::new(Mutex::new(0u8));
+        // State for direct access
+        let pending_chunks = Arc::new(std::sync::Mutex::new(chunks.into_iter().filter(|c| c.downloaded < (c.end - c.start + 1)).collect::<Vec<_>>()));
+        let active_workers = Arc::new(std::sync::Mutex::new(0u8));
         let max_workers = self.config.connections;
         let start_time = std::time::Instant::now();
         let initial_downloaded_at_start = total_downloaded;
         let on_progress_arc = Arc::new(on_progress);
-        let error_occurred = Arc::new(Mutex::new(None));
-        let throttled = Arc::new(Mutex::new(false));
+        let error_occurred = Arc::new(std::sync::Mutex::new(None));
+        let throttled = Arc::new(std::sync::Mutex::new(false));
 
-        // Start with 2 workers
-        let mut current_target_workers = 2u8.min(max_workers);
+        // Start with full power immediately
+        let current_target_workers = max_workers;
         
         // Channel to signal worker completion or scaling
         let (worker_tx, mut worker_rx) = mpsc::channel::<()>(32);
 
-        loop {
-            // Check for errors
-            if let Some(err) = error_occurred.lock().unwrap().clone() {
-                return Err(err);
-            }
+            let mut last_global_db_update = std::time::Instant::now();
 
-            // Spawn workers up to current target
-            let mut current_active = *active_workers.lock().unwrap();
-            while current_active < current_target_workers {
-                let pending = pending_chunks.clone();
-                let chunk = {
-                    let mut p = pending.lock().unwrap();
-                    if p.is_empty() { break; }
-                    p.remove(0)
-                };
+            loop {
+                // Check for errors
+                if let Some(err) = error_occurred.lock().unwrap().clone() {
+                    return Err(err);
+                }
 
-                let active_ptr = active_workers.clone();
-                let progress = self.progress.clone();
-                let on_progress_cb = on_progress_arc.clone();
-                let db_path_clone = self.db_path.clone();
-                let id_clone = self.config.id.clone();
-                let client = self.client.clone();
-                let url = url.clone();
-                let filepath = self.config.filepath.clone();
-                let tx = worker_tx.clone();
-                let start_time_clone = start_time;
-                let initial_downloaded_clone = initial_downloaded_at_start;
-                let error_ptr = error_occurred.clone();
-                let throttled_ptr = throttled.clone();
+                // Spawn workers up to current target
+                let mut current_active = *active_workers.lock().unwrap();
+                while current_active < current_target_workers {
+                    let pending = pending_chunks.clone();
+                    let chunk = {
+                        let mut p = pending.lock().unwrap();
+                        if p.is_empty() { break; }
+                        p.remove(0)
+                    };
 
-                *active_workers.lock().unwrap() += 1;
-                current_active += 1;
+                    let active_ptr = active_workers.clone();
+                    let progress = self.progress.clone();
+                    let downloaded_atomic = self.downloaded_atomic.clone();
+                    let on_progress_cb = on_progress_arc.clone();
+                    let db_path_clone = self.db_path.clone();
+                    let id_clone = self.config.id.clone();
+                    let client = self.client.clone();
+                    let url = url.clone();
+                    let filepath = self.config.filepath.clone();
+                    let tx = worker_tx.clone();
+                    let start_time_clone = start_time;
+                    let initial_downloaded_clone = initial_downloaded_at_start;
+                    let error_ptr = error_occurred.clone();
+                    let throttled_ptr = throttled.clone();
 
-                let url = url.clone();
-                let filepath = filepath.clone();
-                let mut chunk = chunk.clone();
-                let client = client.clone();
-                let progress = progress.clone();
-                let active_ptr = active_ptr.clone();
-                let error_ptr = error_ptr.clone();
-                let throttled_ptr = throttled_ptr.clone();
-                let tx = tx.clone();
-                let db_path_clone = db_path_clone.clone();
-                let id_clone = id_clone.clone();
-                let on_progress_cb = on_progress_cb.clone();
-                let cancel_signal = self.cancel_signal.clone();
-                let last_emit_clone = self.last_emit.clone();
-                
-                tokio::spawn(async move {
-                    let mut attempts = 0;
-                    let max_retries = 3;
-                    let mut final_error = None;
+                    *active_workers.lock().unwrap() += 1;
+                    current_active += 1;
+
+                    let url = url.clone();
+                    let filepath = filepath.clone();
+                    let mut chunk = chunk.clone();
+                    let client = client.clone();
+                    let progress = progress.clone();
+                    let active_ptr = active_ptr.clone();
+                    let error_ptr = error_ptr.clone();
+                    let throttled_ptr = throttled_ptr.clone();
+                    let tx = tx.clone();
+                    let db_path_clone = db_path_clone.clone();
+                    let id_clone = id_clone.clone();
+                    let on_progress_cb = on_progress_cb.clone();
+                    let downloaded_atomic = downloaded_atomic.clone();
+                    let cancel_signal = self.cancel_signal.clone();
+                    let last_emit_clone = self.last_emit.clone();
                     
-                    loop {
-                        // Check cancellation
-                        if let Some(sig) = &cancel_signal {
-                            if sig.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::spawn(async move {
+                        let mut attempts = 0;
+                        let max_retries = 3;
+                        let mut final_error = None;
+                        
+                        loop {
+                            // Check cancellation
+                            if let Some(sig) = &cancel_signal {
+                                if sig.load(std::sync::atomic::Ordering::Relaxed) {
+                                    break;
+                                }
+                            }
+
+                            if attempts >= max_retries {
                                 break;
                             }
-                        }
 
-                        if attempts >= max_retries {
-                            break;
-                        }
-
-                        let res = async {
-                            let mut chunk_file = std::fs::OpenOptions::new().write(true).open(&filepath)?;
+                            let res = async {
+                            let chunk_file_raw = tokio::fs::OpenOptions::new().write(true).open(&filepath).await?;
+                            let mut chunk_file = BufWriter::with_capacity(128 * 1024, chunk_file_raw); // 128KB buffer
                             let current_start = chunk.start + chunk.downloaded;
-                            chunk_file.seek(SeekFrom::Start(current_start))?;
+                            chunk_file.seek(tokio::io::SeekFrom::Start(current_start)).await?;
 
-                            let range = format!("bytes={}-{}", current_start, chunk.end);
-                            let response = client.get(url.clone()).header("Range", range).send().await?;
+                                let range = format!("bytes={}-{}", current_start, chunk.end);
+                                let response = client.get(url.clone()).header("Range", range).send().await?;
 
-                            if response.status() == 429 || response.status() == 503 {
-                                *throttled_ptr.lock().unwrap() = true;
-                                return Err(DownloadError::Network("Server throttling".to_string()));
-                            }
-
-                            if !response.status().is_success() {
-                                return Err(DownloadError::Network(format!("HTTP {}", response.status())));
-                            }
-
-                            let mut stream = response.bytes_stream();
-                            let mut local_downloaded = chunk.downloaded;
-                            let mut last_db_update = std::time::Instant::now();
-
-                            while let Some(item) = stream.next().await {
-                                // Check cancellation in stream
-                                if let Some(sig) = &cancel_signal {
-                                    if sig.load(std::sync::atomic::Ordering::Relaxed) {
-                                        return Ok(()); // Exit gracefully
-                                    }
+                                if response.status() == 429 || response.status() == 503 {
+                                    *throttled_ptr.lock().unwrap() = true;
+                                    return Err(DownloadError::Network("Server throttling".to_string()));
                                 }
 
-                                let bytes = item.map_err(|e| DownloadError::Network(e.to_string()))?;
-                                chunk_file.write_all(&bytes)?;
-                                let len = bytes.len() as u64;
-                                local_downloaded += len;
-                                chunk.downloaded = local_downloaded;
+                                if !response.status().is_success() {
+                                    return Err(DownloadError::Network(format!("HTTP {}", response.status())));
+                                }
 
-                                {
-                                    let mut p = progress.lock().unwrap();
-                                    p.downloaded += len;
-                                    p.connections = *active_ptr.lock().unwrap();
-                                    
-                                    let elapsed = start_time_clone.elapsed().as_secs_f64();
-                                    if elapsed > 0.1 {
-                                        let bytes_since_start = p.downloaded - initial_downloaded_clone;
-                                        p.speed = (bytes_since_start as f64 / elapsed) as u64;
-                                        if p.speed > 0 {
-                                            p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
+                                let mut stream = response.bytes_stream();
+                                let mut local_downloaded = chunk.downloaded;
+                                let mut last_db_update = std::time::Instant::now();
+
+                                while let Some(item) = stream.next().await {
+                                    // Check cancellation in stream
+                                    if let Some(sig) = &cancel_signal {
+                                        if sig.load(std::sync::atomic::Ordering::Relaxed) {
+                                            return Ok(()); // Exit gracefully
                                         }
                                     }
 
-                                    // Throttle progress emission to 50ms
+                                    let bytes = item.map_err(|e| DownloadError::Network(e.to_string()))?;
+                                    chunk_file.write_all(&bytes).await?;
+                                    let len = bytes.len() as u64;
+                                    local_downloaded += len;
+                                    chunk.downloaded = local_downloaded;
+
+                                    // Lock-free progress update
+                                    let current_total_downloaded = downloaded_atomic.fetch_add(len, Ordering::Relaxed) + len;
+
+                                    // Throttled progress emission
                                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                                     let last = last_emit_clone.load(std::sync::atomic::Ordering::Relaxed);
                                     
-                                    if now - last > 50 {
-                                        last_emit_clone.store(now, std::sync::atomic::Ordering::Relaxed);
-                                        (on_progress_cb)(p.clone());
+                                    if now - last > 150 { // Increased to 150ms for performance
+                                        if last_emit_clone.compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                                            let mut p = progress.lock().unwrap();
+                                            p.downloaded = current_total_downloaded;
+                                            p.connections = *active_ptr.lock().unwrap();
+                                            
+                                            let elapsed = start_time_clone.elapsed().as_secs_f64();
+                                            if elapsed > 0.1 {
+                                                let bytes_since_start = p.downloaded - initial_downloaded_clone;
+                                                p.speed = (bytes_since_start as f64 / elapsed) as u64;
+                                                if p.speed > 0 {
+                                                    p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
+                                                }
+                                            }
+                                            (on_progress_cb)(p.clone());
+                                        }
+                                    }
+
+                                    if last_db_update.elapsed().as_secs() >= 5 {
+                                        if let Some(ref db) = db_path_clone {
+                                            crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
+                                        }
+                                        last_db_update = std::time::Instant::now();
                                     }
                                 }
-
-                                if last_db_update.elapsed().as_secs() >= 1 {
-                                    let (total_downloaded, current_speed) = {
-                                        let p = progress.lock().unwrap();
-                                        (p.downloaded as i64, p.speed as i64)
-                                    };
-
-                                    if let Some(ref db) = db_path_clone {
-                                        crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
-                                        crate::db::update_download_progress(db, &id_clone, total_downloaded, current_speed).ok();
-                                    }
-                                    last_db_update = std::time::Instant::now();
+                                
+                                chunk_file.flush().await?; // Ensure everything is written before finishing
+                                if let Some(ref db) = db_path_clone {
+                                    crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
                                 }
-                            }
-                            
-                            if let Some(ref db) = db_path_clone {
-                                crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
-                            }
-                            Ok::<(), DownloadError>(())
-                        }.await;
+                                Ok::<(), DownloadError>(())
+                            }.await;
 
-                        match res {
-                            Ok(_) => {
-                                final_error = None;
-                                break;
-                            }
-                            Err(e) => {
-                                // Check cancellation before retry
-                                if let Some(sig) = &cancel_signal {
-                                    if sig.load(std::sync::atomic::Ordering::Relaxed) {
-                                        break;
-                                    }
+                            match res {
+                                Ok(_) => {
+                                    final_error = None;
+                                    break;
                                 }
-                                final_error = Some(e);
-                                attempts += 1;
-                                tokio::time::sleep(std::time::Duration::from_millis(1000 * attempts as u64)).await;
+                                Err(e) => {
+                                    // Check cancellation before retry
+                                    if let Some(sig) = &cancel_signal {
+                                        if sig.load(std::sync::atomic::Ordering::Relaxed) {
+                                            break;
+                                        }
+                                    }
+                                    final_error = Some(e);
+                                    attempts += 1;
+                                    tokio::time::sleep(std::time::Duration::from_millis(1000 * attempts as u64)).await;
+                                }
                             }
                         }
+
+                        if let Some(e) = final_error {
+                            *error_ptr.lock().unwrap() = Some(e);
+                        }
+
+                        *active_ptr.lock().unwrap() -= 1;
+                        let _ = tx.send(()).await;
+                    });
+                }
+
+                // Global DB progress update
+                if last_global_db_update.elapsed().as_secs() >= 1 {
+                    let (total_downloaded_p, current_speed) = {
+                        let p = self.progress.lock().unwrap();
+                        (p.downloaded as i64, p.speed as i64)
+                    };
+                    if let Some(ref db) = self.db_path {
+                        crate::db::update_download_progress(db, &self.config.id, total_downloaded_p, current_speed).ok();
                     }
+                    last_global_db_update = std::time::Instant::now();
+                }
 
-                    if let Some(e) = final_error {
-                        *error_ptr.lock().unwrap() = Some(e);
-                    }
+                // Wait for a worker to finish or a timeout
+                if current_active == 0 && pending_chunks.lock().unwrap().is_empty() {
+                    break;
+                }
 
-                    *active_ptr.lock().unwrap() -= 1;
-                    let _ = tx.send(()).await;
-                });
-            }
-
-            // Scaling logic: check every 2 seconds
-            let _current_speed = { self.progress.lock().unwrap().speed };
-            if start_time.elapsed().as_secs() % 2 == 0 && current_active < max_workers {
-                if !*throttled.lock().unwrap() {
-                    current_target_workers = (current_target_workers + 1).min(max_workers);
+                tokio::select! {
+                    _ = worker_rx.recv() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {},
                 }
             }
-
-            // Wait for a worker to finish or a timeout for scaling
-            if current_active == 0 && pending_chunks.lock().unwrap().is_empty() {
-                break;
-            }
-
-            tokio::select! {
-                _ = worker_rx.recv() => {},
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {},
-            }
-        }
 
         Ok(())
     }
@@ -465,40 +476,48 @@ impl Downloader {
         let response = self.client.get(&self.config.url).send().await?;
         let total_size = response.content_length().unwrap_or(0);
 
-        let mut file = std::fs::File::create(&self.config.filepath)?;
+        let file_raw = tokio::fs::File::create(&self.config.filepath).await?;
+        let mut file = BufWriter::with_capacity(256 * 1024, file_raw); // Larger buffer for single connection
         let mut stream = response.bytes_stream();
         let start_time = std::time::Instant::now();
-        let initial_downloaded = { self.progress.lock().unwrap().downloaded };
+        let initial_downloaded = self.downloaded_atomic.load(Ordering::Relaxed);
 
         let last_emit_clone = self.last_emit.clone();
+        let downloaded_atomic = self.downloaded_atomic.clone();
+        let progress = self.progress.clone();
+
         while let Some(item) = stream.next().await {
             let chunk = item.map_err(|e| DownloadError::Network(e.to_string()))?;
-            file.write_all(&chunk)?;
+            file.write_all(&chunk).await?;
 
-            let mut p = self.progress.lock().unwrap();
-            p.downloaded += chunk.len() as u64;
-            p.total = total_size;
-            p.connections = 1;
+            let len = chunk.len() as u64;
+            let current_total = downloaded_atomic.fetch_add(len, Ordering::Relaxed) + len;
             
-            let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 0.1 {
-                let bytes_since_start = p.downloaded - initial_downloaded;
-                p.speed = (bytes_since_start as f64 / elapsed) as u64;
-                if p.speed > 0 {
-                    p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
-                }
-            }
-            
-            // Throttle progress emission to 50ms
+            // Throttled progress emission
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
             let last = last_emit_clone.load(std::sync::atomic::Ordering::Relaxed);
             
-            if now - last > 50 {
-                last_emit_clone.store(now, std::sync::atomic::Ordering::Relaxed);
-                (on_progress)(p.clone());
+            if now - last > 150 {
+                if last_emit_clone.compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                    let mut p = progress.lock().unwrap();
+                    p.downloaded = current_total;
+                    p.total = total_size;
+                    p.connections = 1;
+                    
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    if elapsed > 0.1 {
+                        let bytes_since_start = p.downloaded - initial_downloaded;
+                        p.speed = (bytes_since_start as f64 / elapsed) as u64;
+                        if p.speed > 0 {
+                            p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
+                        }
+                    }
+                    (on_progress)(p.clone());
+                }
             }
         }
 
+        file.flush().await?;
         Ok(())
     }
 }

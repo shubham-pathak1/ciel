@@ -190,7 +190,7 @@ pub async fn add_download(
         .ok()
         .flatten()
         .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(8);
+        .unwrap_or(16);
     
     let mut filename = filename;
     
@@ -458,7 +458,7 @@ pub async fn resume_download(
         .ok()
         .flatten()
         .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(8);
+        .unwrap_or(16);
     
     download.connections = max_connections;
 

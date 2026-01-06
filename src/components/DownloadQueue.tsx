@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Plus, AlertCircle, Database as DatabaseIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { motion, AnimatePresence } from "framer-motion";
 import clsx from "clsx";
 import { ModalPortal } from "./ModalPortal";
 import { TorrentFileSelector } from "./TorrentFileSelector";
@@ -206,22 +207,26 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
                 <EmptyState filter={filter} onAdd={() => setIsAddModalOpen(true)} />
             ) : (
                 <div className="flex-1 space-y-3 overflow-y-auto pr-2 pb-12 scrollbar-hide">
-                    {filteredDownloads.map((download) => (
-                        <DownloadCard
-                            key={download.id}
-                            download={download}
-                            onRefresh={handleRefreshList}
-                        />
-                    ))}
+                    <AnimatePresence mode="popLayout" initial={false}>
+                        {filteredDownloads.map((download) => (
+                            <DownloadCard
+                                key={download.id}
+                                download={download}
+                                onRefresh={handleRefreshList}
+                            />
+                        ))}
+                    </AnimatePresence>
                 </div>
             )}
 
-            {isAddModalOpen && (
-                <AddDownloadModal
-                    onClose={() => setIsAddModalOpen(false)}
-                    onAdded={handleRefreshList}
-                />
-            )}
+            <AnimatePresence>
+                {isAddModalOpen && (
+                    <AddDownloadModal
+                        onClose={() => setIsAddModalOpen(false)}
+                        onAdded={handleRefreshList}
+                    />
+                )}
+            </AnimatePresence>
         </div>
     );
 }
@@ -281,17 +286,30 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
     };
 
     return (
-        <div className="card-base p-4 group card-hover relative overflow-hidden">
+        <motion.div
+            layout
+            initial={{ opacity: 0, y: 5, scale: 0.99 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
+            className="card-base p-4 group card-hover relative overflow-hidden"
+        >
             {/* Background Progress Tint - Subtle */}
-            <div
-                className="absolute inset-y-0 left-0 bg-brand-tertiary/20 transition-all duration-500 ease-out z-0 pointer-events-none"
+            <motion.div
+                layout
+                className="absolute inset-y-0 left-0 bg-brand-tertiary/20 z-0 pointer-events-none"
                 style={{ width: `${visualProgress}%` }}
+                transition={{ type: "spring", stiffness: 400, damping: 40 }}
             />
 
             <div className="relative z-10 flex gap-4 items-center">
                 {/* Icon Box */}
                 <div className="w-10 h-10 rounded-lg bg-brand-tertiary flex items-center justify-center">
-                    <FileDown className={clsx("w-5 h-5", getStatusColor())} />
+                    <motion.div
+                        animate={download.status === 'completed' ? { scale: [1, 1.3, 1] } : {}}
+                        transition={{ duration: 0.4 }}
+                    >
+                        <FileDown className={clsx("w-5 h-5", getStatusColor())} />
+                    </motion.div>
                 </div>
 
                 {/* Content */}
@@ -339,13 +357,15 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                         {download.protocol === 'torrent' && (download.size === 0 || download.status === 'queued') && (download.status === 'downloading' || download.status === 'queued') ? (
                             <div className="absolute inset-0 bg-text-primary/30 animate-pulse" />
                         ) : (
-                            <div
+                            <motion.div
+                                layout
                                 className={clsx(
-                                    "h-full rounded-full transition-[width] duration-50 ease-linear",
+                                    "h-full rounded-full",
                                     download.status === 'completed' ? 'bg-status-success' :
                                         download.status === 'error' ? 'bg-status-error' : 'bg-text-primary'
                                 )}
                                 style={{ width: `${visualProgress}%` }}
+                                transition={{ type: "spring", stiffness: 400, damping: 40 }}
                             />
                         )}
                     </div>
@@ -404,7 +424,7 @@ function DownloadCard({ download, onRefresh }: { download: DownloadItem, onRefre
                     </div>
                 </div>
             </div>
-        </div>
+        </motion.div>
     );
 }
 
@@ -521,8 +541,14 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
     return (
         <>
             <ModalPortal>
-                <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm animate-fade-in">
-                    <div className="bg-brand-secondary border border-surface-border w-full max-w-lg rounded-xl p-6 shadow-2xl scale-100 transition-all relative overflow-hidden text-left">
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm">
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.98, y: 10 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.98, y: 5 }}
+                        transition={{ duration: 0.15, ease: "easeOut" }}
+                        className="bg-brand-secondary border border-surface-border w-full max-w-lg rounded-xl p-6 shadow-2xl relative overflow-hidden text-left"
+                    >
                         <h2 className="text-lg font-semibold text-text-primary mb-1">Add New Download</h2>
                         <p className="text-text-secondary text-sm mb-6">Enter a URL or Magnet link to start.</p>
 
@@ -570,7 +596,7 @@ function AddDownloadModal({ onClose, onAdded }: { onClose: () => void, onAdded: 
                                 </button>
                             </div>
                         </div>
-                    </div>
+                    </motion.div>
                 </div>
             </ModalPortal>
 
