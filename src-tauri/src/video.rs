@@ -168,7 +168,7 @@ pub async fn start_video_download_task(
             .arg("--merge-output-format")
             .arg("mp4")
             .arg("--embed-subs")
-            .arg("--all-subs")
+              .arg("--all-subs")
             .arg("--concurrent-fragments")
             .arg(max_connections.to_string())
             .arg("--no-mtime")
