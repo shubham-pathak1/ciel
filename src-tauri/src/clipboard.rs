@@ -24,33 +24,55 @@ pub fn start_clipboard_monitor(app: AppHandle) {
             }
 
             if let Some(ref mut cb) = clipboard {
-                if let Ok(text) = cb.get_text() {
-                    let text = text.trim().to_string();
-                    if !text.is_empty() && text != last_clipboard {
-                        if is_valid_url(&text) {
-                            let _ = app.emit("autocatch-url", &text);
-                            last_clipboard = text;
+                match cb.get_text() {
+                    Ok(text) => {
+                        let text = text.trim().to_string();
+                        if !text.is_empty() && text != last_clipboard {
+                            if is_valid_url(&text) {
+                                let _ = app.emit("autocatch-url", &text);
+                                last_clipboard = text;
+                            }
                         }
+                    },
+                    Err(_) => {
+                        // Don't spam error if clipboard is empty or non-text
                     }
                 }
             } else {
-                // Retry initializing clipboard if it failed
                 clipboard = Clipboard::new().ok();
             }
         }
     });
 }
 
+#[tauri::command]
+pub fn get_clipboard() -> Result<Option<String>, String> {
+    let mut cb = Clipboard::new().map_err(|e| e.to_string())?;
+    match cb.get_text() {
+        Ok(text) => {
+            let text = text.trim().to_string();
+            if is_valid_url(&text) {
+                Ok(Some(text))
+            } else {
+                Ok(None)
+            }
+        },
+        Err(_) => Ok(None)
+    }
+}
+
 fn is_valid_url(url: &str) -> bool {
-    // Basic check for HTTP/HTTPS, Magnet, or common video site URLs
     let url_lower = url.to_lowercase();
     
-    if url_lower.starts_with("http://") || url_lower.starts_with("https://") {
-        // Exclude common non-downloadable sites if needed, but for now we'll be broad
+    // Very broad check: starts with common protocols or contains a dot and no spaces
+    if url_lower.starts_with("http://") || 
+       url_lower.starts_with("https://") || 
+       url_lower.starts_with("magnet:") {
         return true;
     }
     
-    if url_lower.starts_with("magnet:") {
+    // Handle cases like "youtu.be/xxx" without protocol
+    if url.contains('.') && !url.contains(' ') && url.len() > 3 {
         return true;
     }
 

@@ -73,7 +73,6 @@ const formatEta = (seconds: number) => {
 export function DownloadQueue({ filter }: DownloadQueueProps) {
     const [downloads, setDownloads] = useState<DownloadItem[]>([]);
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-    const [detectedUrl, setDetectedUrl] = useState<string | null>(null);
     const [autocatchUrl, setAutocatchUrl] = useState("");
 
     const handleRefreshList = async () => {
@@ -117,7 +116,8 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
         });
 
         const unlistenAutocatch = listen<string>("autocatch-url", (event) => {
-            setDetectedUrl(event.payload);
+            // Store the detected URL globally but don't show a toast
+            setAutocatchUrl(event.payload);
         });
 
         return () => {
@@ -197,21 +197,7 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
                 )}
             </AnimatePresence>
 
-            <AnimatePresence>
-                {detectedUrl && (
-                    <div className="fixed bottom-8 right-8 z-[60]">
-                        <AutocatchNotification
-                            url={detectedUrl}
-                            onAdd={() => {
-                                setAutocatchUrl(detectedUrl);
-                                setIsAddModalOpen(true);
-                                setDetectedUrl(null);
-                            }}
-                            onDismiss={() => setDetectedUrl(null)}
-                        />
-                    </div>
-                )}
-            </AnimatePresence>
+            {/* Removed AutocatchNotification */}
         </div>
     );
 }
@@ -370,9 +356,26 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     const [videoMetadata, setVideoMetadata] = useState<any | null>(null);
 
     useEffect(() => {
-        if (initialUrl) {
-            handleAdd();
-        }
+        const checkClipboard = async () => {
+            // Priority 1: Explicitly passed initialUrl from parent (Autocatch event)
+            if (initialUrl && initialUrl !== url) {
+                setUrl(initialUrl);
+                return;
+            }
+
+            // Priority 2: Direct clipboard check on mount if field is empty
+            if (!url) {
+                try {
+                    const clipText = await invoke<string | null>("get_clipboard");
+                    if (clipText) {
+                        setUrl(clipText);
+                    }
+                } catch (e) {
+                    // Silent failure
+                }
+            }
+        };
+        checkClipboard();
     }, [initialUrl]);
 
     const handleAdd = async () => {
@@ -502,29 +505,3 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     );
 }
 
-function AutocatchNotification({ url, onAdd, onDismiss }: { url: string, onAdd: () => void, onDismiss: () => void }) {
-    return (
-        <motion.div
-            initial={{ opacity: 0, x: 20, scale: 0.95 }}
-            animate={{ opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, x: 20, scale: 0.95 }}
-            className="bg-brand-secondary border border-surface-border p-4 rounded-xl shadow-2xl flex items-center gap-4 min-w-[320px] max-w-md"
-        >
-            <div className="w-10 h-10 rounded-full bg-brand-tertiary flex items-center justify-center text-text-primary">
-                <Wifi size={20} />
-            </div>
-            <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-0.5">Link Detected</p>
-                <p className="text-sm text-text-primary truncate font-mono">{url}</p>
-            </div>
-            <div className="flex items-center gap-2">
-                <button onClick={onDismiss} className="p-2 text-text-tertiary hover:text-text-primary transition-colors">
-                    <Trash2 size={16} />
-                </button>
-                <button onClick={onAdd} className="bg-text-primary text-brand-primary px-3 py-1.5 rounded-lg text-xs font-bold hover:opacity-90 transition-opacity">
-                    Add
-                </button>
-            </div>
-        </motion.div>
-    );
-}
