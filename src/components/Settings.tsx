@@ -12,6 +12,7 @@ interface SettingsState {
     theme: string;
     ask_location: string;
     autocatch_enabled: string;
+    speed_limit: string;
 }
 
 export function Settings() {
@@ -22,6 +23,7 @@ export function Settings() {
         theme: "dark",
         ask_location: "false",
         autocatch_enabled: "true",
+        speed_limit: "0",
     });
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
@@ -42,6 +44,7 @@ export function Settings() {
                 theme: result.theme || "dark",
                 ask_location: result.ask_location || "false",
                 autocatch_enabled: result.autocatch_enabled || "true",
+                speed_limit: result.speed_limit || "0",
             });
 
             // Check for active downloads
@@ -146,6 +149,45 @@ export function Settings() {
                     </div>
                 );
             case "network":
+                const limitValues = [0, 102400, 512000, 1048576, 2097152, 5242880, 10485760, 26214400, 52428800, 104857600];
+                const formatLimit = (bytes: string) => {
+                    const b = parseInt(bytes);
+                    if (b === 0) return "Unlimited";
+                    if (b < 1048576) return `${(b / 1024).toFixed(0)} KB/s`;
+                    return `${(b / 1048576).toFixed(0)} MB/s`;
+                };
+
+                return (
+                    <div className="space-y-8 animate-fade-in">
+                        <div className="space-y-4">
+                            <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Global Speed Limit</label>
+                            <div className="flex items-center gap-4">
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max={limitValues.length - 1}
+                                    step="1"
+                                    value={limitValues.indexOf(limitValues.find(v => v >= parseInt(settings.speed_limit)) ?? 0)}
+                                    onChange={(e) => handleChange("speed_limit", limitValues[parseInt(e.target.value)].toString())}
+                                    className="flex-1 h-2 bg-brand-tertiary rounded-lg appearance-none cursor-pointer accent-text-primary"
+                                />
+                                <div className="w-24 h-10 flex items-center justify-center bg-brand-secondary rounded-lg border border-surface-border text-text-primary font-bold font-mono text-xs whitespace-nowrap">
+                                    {formatLimit(settings.speed_limit)}
+                                </div>
+                            </div>
+                            <p className="text-xs text-text-tertiary font-medium">Limits total download bandwidth across all active tasks.</p>
+                        </div>
+
+                        <div className="text-center py-6 border-t border-surface-border mt-8">
+                            <div className="w-12 h-12 rounded-full bg-brand-tertiary flex items-center justify-center mx-auto mb-3 text-text-tertiary opacity-50">
+                                <Globe size={24} />
+                            </div>
+                            <h4 className="text-sm font-medium text-text-secondary mb-1">More Network Options</h4>
+                            <p className="text-[10px] text-text-tertiary px-12">Proxies and Advanced User-Agents are under active development.</p>
+                        </div>
+                    </div>
+                );
+            case "performance":
                 return (
                     <div className="space-y-8 animate-fade-in">
                         {hasActiveDownloads && (

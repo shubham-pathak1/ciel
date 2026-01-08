@@ -358,6 +358,13 @@ async fn start_download_task(
     
     manager.add_active(id.clone(), tx).await;
 
+    // Fetch global speed limit
+    let speed_limit = db::get_setting(&db_path, "speed_limit")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
     // Spawn download in background
     tokio::spawn(async move {
         let config = DownloadConfig {
@@ -366,7 +373,7 @@ async fn start_download_task(
             filepath: PathBuf::from(filepath),
             connections,
             chunk_size: 5 * 1024 * 1024,
-            speed_limit: 0,
+            speed_limit,
         };
 
         let downloader = Downloader::new(config)

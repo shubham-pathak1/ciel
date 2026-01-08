@@ -61,10 +61,10 @@ pub struct DownloadConfig {
 impl Default for DownloadConfig {
     fn default() -> Self {
         Self {
-            id: String::new(),
-            url: String::new(),
+            id: "default".to_string(),
+            url: "".to_string(),
             filepath: PathBuf::new(),
-            connections: 4,
+            connections: 8,
             chunk_size: 5 * 1024 * 1024, // 5 MB
             speed_limit: 0,
         }
@@ -85,6 +85,7 @@ pub struct DownloadProgress {
     pub eta: u64,
     /// Active connections
     pub connections: u8,
+    pub speed_limit: u64, // bytes per second, 0 for no limit
 }
 
 /// Chunk record for database persistence
@@ -125,6 +126,7 @@ impl Downloader {
             speed: 0,
             eta: 0,
             connections: config.connections,
+            speed_limit: config.speed_limit,
         }));
 
         let client = Client::builder()
@@ -322,6 +324,10 @@ impl Downloader {
                     let cancel_signal = self.cancel_signal.clone();
                     let last_emit_clone = self.last_emit.clone();
                     
+                    // Capture config for worker to avoid escaping self
+                    let global_speed_limit = self.config.speed_limit;
+                    let num_connections = self.config.connections;
+
                     tokio::spawn(async move {
                         let mut attempts = 0;
                         let max_retries = 3;
@@ -372,6 +378,21 @@ impl Downloader {
                                     let bytes = item.map_err(|e| DownloadError::Network(e.to_string()))?;
                                     chunk_file.write_all(&bytes).await?;
                                     let len = bytes.len() as u64;
+
+                                    // Local Rate Limiting Calculation
+                                    // If speed limit is set, we calculate how much time this chunk "costs"
+                                    // based on the per_worker share of the global limit.
+                                    if global_speed_limit > 0 {
+                                        let per_worker_limit = global_speed_limit / (num_connections as u64).max(1);
+                                        if per_worker_limit > 0 {
+                                            // Cost in milliseconds: (bytes / bytes_per_sec) * 1000
+                                            let cost_ms = (len * 1000) / per_worker_limit;
+                                            if cost_ms > 0 {
+                                                tokio::time::sleep(std::time::Duration::from_millis(cost_ms)).await;
+                                            }
+                                        }
+                                    }
+
                                     local_downloaded += len;
                                     chunk.downloaded = local_downloaded;
 

@@ -199,15 +199,24 @@ pub async fn start_video_download_task(
         format_id
     };
 
+    let speed_limit = db::get_setting(&db_path, "speed_limit")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
     tokio::spawn(async move {
-        let mut child = tokio::process::Command::new("yt-dlp")
-            .arg("-f")
+        let mut cmd = tokio::process::Command::new("yt-dlp");
+        cmd.arg("-f")
             .arg(&format_selector)
             .arg("--merge-output-format")
-            .arg("mp4")
-            // .arg("--embed-subs") // Slows down long videos significantly
-            // .arg("--all-subs")   // Slows down long videos significantly
-            .arg("--concurrent-fragments")
+            .arg("mp4");
+        
+        if speed_limit > 0 {
+            cmd.arg("--ratelimit").arg(format!("{}", speed_limit));
+        }
+
+        let mut child = cmd.arg("--concurrent-fragments")
             .arg(max_connections.to_string())
             .arg("--no-mtime")
             .arg("--no-check-certificates")
