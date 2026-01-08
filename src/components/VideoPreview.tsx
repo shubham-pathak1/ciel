@@ -8,6 +8,8 @@ interface VideoFormat {
     filesize: number | null;
     protocol: string;
     note: string | null;
+    acodec: string | null;
+    vcodec: string | null;
 }
 
 interface VideoMetadata {
@@ -20,7 +22,7 @@ interface VideoMetadata {
 
 interface VideoPreviewProps {
     metadata: VideoMetadata;
-    onDownload: (formatId: string, ext: string) => void;
+    onDownload: (formatId: string, ext: string, acodec?: string, totalSize?: number) => void;
     onCancel: () => void;
 }
 
@@ -51,6 +53,16 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ metadata, onDownload
         return `${size.toFixed(1)} ${units[unitIndex]}`;
     };
 
+    // Find audio options
+    const audioFormats = metadata.formats.filter(f => f.resolution === 'audio only' && f.filesize);
+    const bestAudio = audioFormats.sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
+    const ecoAudio = audioFormats.sort((a, b) => (a.filesize || 0) - (b.filesize || 0))[0];
+
+    const getTargetAudio = (height: number) => {
+        if (height <= 480) return ecoAudio || bestAudio;
+        return bestAudio;
+    };
+
     return (
         <div className="space-y-4">
             <div className="flex gap-4">
@@ -79,29 +91,36 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ metadata, onDownload
             <div className="space-y-2">
                 <label className="text-xs font-medium text-zinc-400 uppercase tracking-wider">Select Quality</label>
                 <div className="max-h-48 overflow-y-auto pr-1 space-y-1 custom-scrollbar">
-                    {filteredFormats.map((f, i) => (
-                        <button
-                            key={`${f.format_id}-${i}`}
-                            onClick={() => setSelectedFormat(f.format_id.toString())}
-                            className={`w-full flex items-center justify-between p-2 rounded-lg border transition-all ${selectedFormat === f.format_id
-                                ? 'bg-zinc-100 border-zinc-100 text-zinc-900'
-                                : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300'
-                                }`}
-                        >
-                            <div className="flex items-center gap-3">
-                                {f.resolution === 'audio only' ? <Music className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
-                                <div className="text-left">
-                                    <div className={`text-xs font-semibold ${selectedFormat === f.format_id ? 'text-zinc-900' : 'text-zinc-200'}`}>
-                                        {f.resolution} {f.note ? `(${f.note})` : ''}
+                    {filteredFormats.map((f, i) => {
+                        const height = parseInt(f.resolution.split('x')[1]) || 0;
+                        const needsAudio = !f.acodec || f.acodec === 'none';
+                        const targetAudio = getTargetAudio(height);
+                        const totalSize = (f.filesize || 0) + (needsAudio && targetAudio ? (targetAudio.filesize || 0) : 0);
+
+                        return (
+                            <button
+                                key={`${f.format_id}-${i}`}
+                                onClick={() => setSelectedFormat(f.format_id.toString())}
+                                className={`w-full flex items-center justify-between p-2 rounded-lg border transition-all ${selectedFormat === f.format_id
+                                    ? 'bg-zinc-100 border-zinc-100 text-zinc-900'
+                                    : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300'
+                                    }`}
+                            >
+                                <div className="flex items-center gap-3">
+                                    {f.resolution === 'audio only' ? <Music className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
+                                    <div className="text-left">
+                                        <div className={`text-xs font-semibold ${selectedFormat === f.format_id ? 'text-zinc-900' : 'text-zinc-200'}`}>
+                                            {f.resolution} {f.note ? `(${f.note})` : ''}
+                                        </div>
+                                        <div className="text-[10px] opacity-70 capitalize">{f.extension} • {f.protocol}</div>
                                     </div>
-                                    <div className="text-[10px] opacity-70 capitalize">{f.extension} • {f.protocol}</div>
                                 </div>
-                            </div>
-                            <div className="text-[10px] font-mono whitespace-nowrap">
-                                {formatSize(f.filesize)}
-                            </div>
-                        </button>
-                    ))}
+                                <div className="text-[10px] font-mono whitespace-nowrap">
+                                    {formatSize(totalSize)}
+                                </div>
+                            </button>
+                        );
+                    })}
                 </div>
             </div>
 
@@ -116,7 +135,18 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ metadata, onDownload
                     disabled={!selectedFormat}
                     onClick={() => {
                         const f = filteredFormats.find(x => x.format_id === selectedFormat);
-                        if (f) onDownload(f.format_id.toString(), f.extension.toString());
+                        if (f) {
+                            const height = parseInt(f.resolution.split('x')[1]) || 0;
+                            const needsAudio = !f.acodec || f.acodec === 'none';
+                            const targetAudio = getTargetAudio(height);
+                            // Pass audio ID if we need to fetch it separately
+                            const audioId = needsAudio && targetAudio ? targetAudio.format_id : undefined;
+
+                            // Calculate total size for backend tracking
+                            const totalSize = (f.filesize || 0) + (needsAudio && targetAudio ? (targetAudio.filesize || 0) : 0);
+
+                            onDownload(f.format_id.toString(), f.extension.toString(), audioId, totalSize);
+                        }
                     }}
                     className="flex-[2] flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-zinc-100 text-zinc-950 text-sm font-bold hover:bg-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >

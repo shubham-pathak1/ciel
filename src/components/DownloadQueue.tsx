@@ -37,6 +37,7 @@ interface DownloadItem {
     protocol: "http" | "torrent" | "video";
     status: "downloading" | "paused" | "completed" | "queued" | "error";
     filepath: string;
+    status_text?: string;
 }
 
 interface ProgressPayload {
@@ -46,6 +47,7 @@ interface ProgressPayload {
     speed: number;
     eta: number;
     connections: number;
+    status_text?: string;
 }
 
 const formatSize = (bytes: number) => {
@@ -100,6 +102,7 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
                             eta: progress.eta,
                             connections: progress.connections,
                             status: "downloading",
+                            status_text: progress.status_text,
                         };
                     }
                     return d;
@@ -304,19 +307,28 @@ const DownloadCard = React.forwardRef<HTMLDivElement, { download: DownloadItem, 
                             <motion.div
                                 layout
                                 className={clsx(
-                                    "h-full rounded-full",
+                                    "h-full rounded-full transition-all duration-500",
                                     download.status === 'completed' ? 'bg-status-success' :
-                                        download.status === 'error' ? 'bg-status-error' : 'bg-text-primary'
+                                        download.status === 'error' ? 'bg-status-error' :
+                                            download.status_text && download.status_text !== 'Starting...'
+                                                ? 'bg-brand-primary animate-progress-indeterminate bg-[length:1rem_1rem] bg-gradient-to-r from-brand-primary via-brand-secondary to-brand-primary'
+                                                : 'bg-text-primary'
                                 )}
-                                style={{ width: `${visualProgress}%` }}
+                                style={{ width: `${download.status_text && download.status_text !== 'Starting...' ? 100 : visualProgress}%` }}
                                 transition={{ type: "spring", stiffness: 400, damping: 40 }}
                             />
                         </div>
 
                         <div className="flex items-center justify-between text-xs text-text-secondary mt-0.5">
                             <div className="flex items-center gap-3">
-                                <span>{formatSize(download.downloaded)} / {formatSize(download.size)}</span>
-                                {download.status === 'downloading' && (
+                                {download.status_text && (
+                                    <span className="text-white font-medium animate-pulse">{download.status_text}</span>
+                                )}
+                                {!download.status_text && (
+                                    <span>{formatSize(download.downloaded)} / {formatSize(download.size)}</span>
+                                )}
+
+                                {download.status === 'downloading' && !download.status_text && (
                                     <>
                                         <div className="flex items-center gap-1 text-text-primary">
                                             <ArrowDown size={10} />
@@ -413,11 +425,11 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         }
     };
 
-    const handleVideoDownload = async (formatId: string, ext: string) => {
+    const handleVideoDownload = async (formatId: string, ext: string, audioId?: string, totalSize?: number) => {
         setIsAdding(true);
         try {
             const filename = `${videoMetadata.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
-            await invoke("add_video_download", { url, formatId, filepath: filename });
+            await invoke("add_video_download", { url, formatId, audioId, totalSize, filepath: filename });
             onAdded();
             onClose();
         } catch (err) {

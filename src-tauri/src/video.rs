@@ -22,6 +22,8 @@ pub struct VideoFormat {
     pub filesize: Option<u64>,
     pub protocol: String,
     pub note: Option<String>,
+    pub acodec: Option<String>,
+    pub vcodec: Option<String>,
 }
 
 #[tauri::command]
@@ -65,6 +67,8 @@ pub async fn analyze_video_url(url: String) -> Result<VideoMetadata, String> {
             let filesize = f["filesize"].as_u64().or_else(|| f["filesize_approx"].as_u64());
             let protocol = f["protocol"].as_str().unwrap_or("").to_string();
             let note = f["format_note"].as_str().map(|s| s.to_string());
+            let acodec = f["acodec"].as_str().map(|s| s.to_string());
+            let vcodec = f["vcodec"].as_str().map(|s| s.to_string());
 
             formats.push(VideoFormat {
                 format_id,
@@ -73,6 +77,8 @@ pub async fn analyze_video_url(url: String) -> Result<VideoMetadata, String> {
                 filesize,
                 protocol,
                 note,
+                acodec,
+                vcodec,
             });
         }
     }
@@ -93,6 +99,8 @@ pub async fn add_video_download(
     manager: State<'_, DownloadManager>,
     url: String,
     format_id: String,
+    audio_id: Option<String>,
+    total_size: Option<u64>,
     filepath: String,
 ) -> Result<(), String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -113,12 +121,19 @@ pub async fn add_video_download(
 
     let final_path = resolve_download_path(&app, &db_state.path, &adjusted_filepath, None);
     
+    // Store specific audio choice in metadata
+    let meta_json = serde_json::json!({
+        "format_id": format_id,
+        "audio_id": audio_id,
+        "total_size": total_size
+    });
+
     let download = Download {
         id: id.clone(),
         url: url.clone(),
         filename: adjusted_filepath.clone(),
         filepath: final_path.clone(),
-        size: 0,
+        size: total_size.map(|s| s as i64).unwrap_or(0),
         downloaded: 0,
         status: DownloadStatus::Downloading,
         protocol: DownloadProtocol::Video,
@@ -128,7 +143,7 @@ pub async fn add_video_download(
         completed_at: None,
         error_message: None,
         info_hash: None,
-        metadata: Some(format_id.clone()),
+        metadata: Some(meta_json.to_string()),
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
@@ -145,11 +160,24 @@ pub async fn start_video_download_task(
     let id = download.id.clone();
     let url = download.url.clone();
     let final_path = download.filepath.clone();
-    let format_id = download.metadata.clone().unwrap_or_else(|| "best".to_string());
     let db_path_clone = db_path.clone();
     let app_clone = app.clone();
     let id_clone = id.clone();
     let manager_clone = manager.clone();
+
+    // Parse format selection from metadata
+    let (format_id, audio_id) = if let Some(meta_str) = &download.metadata {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(meta_str) {
+            let fid = json["format_id"].as_str().unwrap_or("best").to_string();
+            let aid = json["audio_id"].as_str().map(|s| s.to_string());
+            (fid, aid)
+        } else {
+            // Legacy/Fallback: metadata is just the format_id string
+            (meta_str.clone(), None)
+        }
+    } else {
+        ("best".to_string(), None)
+    };
 
     // Create cancellation channel
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -161,14 +189,24 @@ pub async fn start_video_download_task(
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(8);
 
+    // Construct format selector
+    // If specific audio ID is provided, merge it.
+    // If None, assume video file already has audio (progressive) OR user selected audio-only.
+    // We NO LONGER blindly append +bestaudio. Smart frontend does the picking.
+    let format_selector = if let Some(aid) = audio_id {
+        format!("{}+{}", format_id, aid)
+    } else {
+        format_id
+    };
+
     tokio::spawn(async move {
         let mut child = tokio::process::Command::new("yt-dlp")
             .arg("-f")
-            .arg(&format!("{}+bestaudio/best", format_id))
+            .arg(&format_selector)
             .arg("--merge-output-format")
             .arg("mp4")
-            .arg("--embed-subs")
-              .arg("--all-subs")
+            // .arg("--embed-subs") // Slows down long videos significantly
+            // .arg("--all-subs")   // Slows down long videos significantly
             .arg("--concurrent-fragments")
             .arg(max_connections.to_string())
             .arg("--no-mtime")
@@ -188,14 +226,56 @@ pub async fn start_video_download_task(
         let stdout = child.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout).lines();
 
-        let mut max_total_size = 0;
+        // Initial total from metadata if available
+        let expected_total_size = if let Some(meta_str) = download.metadata {
+             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                 json["total_size"].as_u64().unwrap_or(0)
+             } else { 0 }
+        } else { 0 };
+
+        let mut accumulated_completed_bytes: u64 = 0;
+        let mut current_file_max_size: u64 = 0;
         let mut aborted = false;
+
+        // Track the filename we are currently processing to detect switches
+        // let mut current_destination = String::new();
+        let mut status_text: Option<String> = Some("Starting...".to_string());
 
         loop {
             tokio::select! {
                 line_res = reader.next_line() => {
                     match line_res {
                         Ok(Some(line)) => {
+                            // Detect status/phase changes
+                            if line.starts_with("[youtube]") {
+                                status_text = Some("Extracting info...".to_string());
+                            } else if line.starts_with("[Merger]") {
+                                status_text = Some("Assembling...".to_string());
+                            } else if line.starts_with("[ExtractAudio]") {
+                                status_text = Some("Extracting Audio...".to_string());
+                            } else if line.starts_with("[ffmpeg]") {
+                                status_text = Some("Processing...".to_string());
+                            }
+
+                            // Detect new file start
+                            if line.contains("[download] Destination:") {
+                                // If we were tracking a previous file, assume it finished successfully
+                                // and add its max size to accumulated. 
+                                // (Unless it's the very first line).
+                                if current_file_max_size > 0 {
+                                    accumulated_completed_bytes += current_file_max_size;
+                                    current_file_max_size = 0;
+                                }
+                                status_text = None; // Clear status text when downloading starts
+                                
+                                // Reset for new file
+                                // current_destination = line.clone();
+                            }
+                            // Detect "already downloaded"
+                            else if line.contains("has already been downloaded") {
+                                // Try to parse size? Usually it says "100% of X MiB"
+                            }
+
                             if line.contains("[download]") && line.contains("%") {
                                 let parts: Vec<&str> = line.split_whitespace().collect();
                                 let mut progress_pct = 0.0;
@@ -218,25 +298,47 @@ pub async fn start_video_download_task(
                                     }
                                 }
 
-                                if total_size_bytes > max_total_size {
-                                    max_total_size = total_size_bytes;
+                                if total_size_bytes > current_file_max_size {
+                                    current_file_max_size = total_size_bytes;
                                 }
 
-                                let downloaded = (progress_pct / 100.0 * max_total_size as f64) as i64;
+                                // Calculate reliable totals
+                                let current_part_downloaded = (progress_pct / 100.0 * current_file_max_size as f64) as u64;
+                                let total_downloaded_so_far = accumulated_completed_bytes + current_part_downloaded;
+                                
+                                // Dynamic Total: Whichever is larger (Expected vs Actual Running Sum)
+                                let running_total = accumulated_completed_bytes + current_file_max_size;
+                                let display_total = if expected_total_size > running_total { expected_total_size } else { running_total };
+
+                                // Create "unified" view for the UI.
+                                // If expected_total is accurate, this will smoothly go from 0 to 100%.
                                 
                                 let _ = app_clone.emit("download-progress", serde_json::json!({
                                     "id": id_clone,
-                                    "total": max_total_size,
-                                    "downloaded": downloaded,
+                                    "total": display_total,
+                                    "downloaded": total_downloaded_so_far,
                                     "speed": speed_bytes,
                                     "eta": eta_secs,
                                     "connections": max_connections,
+                                    "status_text": status_text,
                                 }));
 
-                                let _ = db::update_download_progress(&db_path_clone, &id_clone, downloaded, speed_bytes as i64);
-                                if max_total_size > 0 {
-                                    let _ = db::update_download_size(&db_path_clone, &id_clone, max_total_size as i64);
+                                let _ = db::update_download_progress(&db_path_clone, &id_clone, total_downloaded_so_far as i64, speed_bytes as i64);
+                                if display_total > 0 {
+                                    let _ = db::update_download_size(&db_path_clone, &id_clone, display_total as i64);
                                 }
+                            }
+                            // If it's a status line but not download progress, we should emit an update too
+                            else if status_text.is_some() && !line.contains("[download]") {
+                                 let _ = app_clone.emit("download-progress", serde_json::json!({
+                                    "id": id_clone,
+                                    "total": if expected_total_size > 0 { expected_total_size } else { 0 },
+                                    "downloaded": accumulated_completed_bytes, // Show what's done so far
+                                    "speed": 0,
+                                    "eta": 0,
+                                    "connections": 0,
+                                    "status_text": status_text,
+                                }));
                             }
                         }
                         Ok(None) => break,
@@ -256,6 +358,9 @@ pub async fn start_video_download_task(
         if !aborted {
             let status = child.wait().await;
             if status.map_or(false, |s| s.success()) {
+                // Wait briefly for OS to finalize file handle
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
                 // Update final size from disk
                 if let Ok(meta) = std::fs::metadata(&final_path) {
                     let final_size = meta.len() as i64;
@@ -279,9 +384,9 @@ pub async fn start_video_download_task(
 
 fn parse_size(s: &str) -> u64 {
     let s = s.to_lowercase();
-    let factor = if s.contains("gib") { 1024 * 1024 * 1024 }
-    else if s.contains("mib") { 1024 * 1024 }
-    else if s.contains("kib") { 1024 }
+    let factor = if s.contains("gb") || s.contains("gib") { 1024 * 1024 * 1024 }
+    else if s.contains("mb") || s.contains("mib") { 1024 * 1024 }
+    else if s.contains("kb") || s.contains("kib") { 1024 }
     else { 1 };
     
     let num = s.chars().take_while(|c| c.is_digit(10) || *c == '.').collect::<String>();
