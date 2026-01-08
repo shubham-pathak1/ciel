@@ -31,10 +31,9 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({ metadata, onDownload
 
     // Filter useful formats (avoid m3u8 if possible, prefer progressive or dash with sizes)
     const filteredFormats = metadata.formats.filter(f =>
-        (f.resolution !== 'audio only' || f.filesize) &&
+        f.resolution !== 'audio only' &&
         !f.protocol.includes('m3u8') &&
-        f.extension !== 'mhtml' &&
-        f.extension !== 'webm'
+        f.extension !== 'mhtml'
     ).sort((a, b) => {
         // Sort by resolution (naive)
         const getRes = (r: string) => parseInt(r.split('x')[1]) || 0;

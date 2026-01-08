@@ -12,6 +12,8 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/Cargo.lock
 src-tauri/downloads/
+src-tauri/.cargo/config.toml
+!src-tauri/.cargo/config.toml.example
 node_modules/
 dist/
 

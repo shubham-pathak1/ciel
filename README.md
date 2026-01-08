@@ -58,6 +58,11 @@ npm run tauri dev
 npm run tauri build
 ```
 
+### 🛠️ Advanced: Build Customization (Optional)
+Rust build directories (`target`) can grow quite large. To redirect compilation to a different drive (e.g., to save space on `C:` or improve performance):
+1. Copy `src-tauri/.cargo/config.toml.example` to `src-tauri/.cargo/config.toml`.
+2. Edit the `target-dir` path to your preferred location.
+
 ## 🔒 Privacy
 Ciel is 100% offline-first. No tracking, no telemetry, no accounts. All download history and settings are stored in a local SQLite database in your app data directory.
 
