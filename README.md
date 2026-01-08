@@ -10,6 +10,8 @@ Ciel is designed for users who demand extreme speed, privacy, and a distraction-
 
 ### ⚡ Extreme Throughput
 - **64-Thread HTTP Engine**: Multi-connection parallel downloading with intelligent chunk management for wire-speed performance.
+  > [!CAUTION]
+  > Using extremely high thread counts (e.g., 64) may lead to temporary IP bans or rate-limiting by major platforms like YouTube or Google Drive. Use with discretion.
 - **Fast Pre-allocation**: Uses `tokio::fs::File::set_len` for instant file creation, preventing disk fragmentation.
 - **Smart Headers**: RFC 5987 compliant parsing for accurate filename extraction even on complex servers.
 

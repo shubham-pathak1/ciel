@@ -167,7 +167,7 @@ export function Settings() {
                                 <input
                                     type="range"
                                     min="1"
-                                    max="32"
+                                    max="64"
                                     value={settings.max_connections}
                                     onChange={(e) => handleChange("max_connections", e.target.value)}
                                     className="flex-1 h-2 bg-brand-tertiary rounded-lg appearance-none cursor-pointer accent-text-primary"
@@ -176,7 +176,17 @@ export function Settings() {
                                     {settings.max_connections}
                                 </div>
                             </div>
-                            <p className="text-xs text-text-tertiary font-medium">Higher values may increase speed but also server load.</p>
+                            <div className="space-y-2">
+                                <p className="text-xs text-text-tertiary font-medium">Higher values may increase speed but also server load.</p>
+                                {parseInt(settings.max_connections) > 32 && (
+                                    <div className="flex items-start gap-2 p-3 rounded bg-status-error/10 border border-status-error/20 text-status-error text-[10px] leading-relaxed">
+                                        <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
+                                        <p>
+                                            <strong>CAUTION:</strong> Using more than 32 connections may lead to temporary IP bans or rate-limiting by platforms like YouTube or Google Drive. Use at your own risk.
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
                         </div>
 
                         <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
