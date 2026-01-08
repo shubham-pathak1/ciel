@@ -1,49 +1,65 @@
 # Ciel
 
-> **Status**: 🚧 In Development (Alpha)
+> **High-performance, minimal download manager for Windows.** Built with Tauri & Rust.
 
-**Ciel** is a high-performance download manager built with Tauri. Designed for users who value speed, privacy, and distraction-free software.
+Ciel is designed for users who demand extreme speed, privacy, and a distraction-free environment. It strips away the bloat of traditional download managers, focusing on core throughput and a premium user experience.
 
-## Philosophy
-- **Performance**: Native Rust backend via Tauri 2.0
-- **Privacy**: Zero telemetry. All data stays local.
-- **Minimalism**: Clean, focused UI without unnecessary bloat.
+---
 
-## Tech Stack
-- **Core**: Tauri v2 + Rust
+## 🔥 Key Features
+
+### ⚡ Extreme Throughput
+- **64-Thread HTTP Engine**: Multi-connection parallel downloading with intelligent chunk management for wire-speed performance.
+- **Fast Pre-allocation**: Uses `tokio::fs::File::set_len` for instant file creation, preventing disk fragmentation.
+- **Smart Headers**: RFC 5987 compliant parsing for accurate filename extraction even on complex servers.
+
+### 🎥 Pro Video Integration
+- **Universal Support**: Powered by `yt-dlp`, supporting YouTube, Twitter, Instagram, and 1000+ other sites.
+- **Ultra-HD Quality**: Download up to 8K resolution with support for VP9/AV1 codecs.
+- **Auto-Muxing & Subs**: Automatic high-quality audio merging and subtitle embedding via FFmpeg.
+- **Fast Analysis**: Optimized handshakes for nearly instant video metadata retrieval.
+
+### 🔗 Autocatch (Clipboard Monitoring)
+- **Instant Detection**: Monitor the clipboard for HTTP, Magnet, and Video URLs.
+- **Quiet Workflow**: A minimal, non-intrusive prompt allows you to add downloads without leaving your browser.
+
+### 🧪 Advanced Torrents
+- **Selective Fetching**: Preview torrent contents and select only the files you need.
+- **Metadata Polling**: Robust analysis of magnet links before the download begins.
+
+### 🎨 Premium Desktop Experience
+- **Fluid UI**: Built with React & Framer Motion for smooth, layout-aware transitions.
+- **Native Look**: Deep Windows integration with Mica effect, custom title bars, and "Show in Folder" shortcuts.
+- **Persistent Queue**: SQLite-backed queue that survives app restarts and computer crashes.
+
+---
+
+## 🛠️ Tech Stack
+- **Backend**: Tauri v2 + Rust (`tokio`, `reqwest`, `librqbit`)
 - **Frontend**: React + TypeScript + Vite
-- **Styling**: Tailwind CSS (Monochrome Zinc/Slate theme)
-- **Engines**: `librqbit` (Torrents) + `reqwest` (HTTP)
+- **Styling**: Vanilla CSS + Tailwind (Custom Matte Zinc/Slate theme)
+- **Persistence**: SQLite (via `rusqlite`)
 
-## Features
+---
 
-### Downloads
-- **Multi-Connection HTTP Engine**: High-speed parallel downloads with automatic retry
-- **Smart Filename Extraction**: RFC 5987 compliant parsing of `Content-Disposition` headers
-- **Configurable Download Location**: Choose default folder or ask every time
+## 🚀 Getting Started
 
-### Torrents
-- **Selective File Download**: Preview and select specific files from torrents before downloading
-- **Metadata Preview**: View torrent contents and file sizes before committing
-- **Peer Statistics**: Real-time peer count and download speed
-
-### UI/UX
-- **Monochrome Design**: Clean, matte dark theme inspired by modern desktop apps
-- **Progress Tracking**: Visual progress bars with speed, ETA, and connection count
-- **Open in Folder**: One-click access to downloaded files in explorer
-
-## Development
+> [!IMPORTANT]
+> For high-resolution video downloads (1080p+), ensure `yt-dlp` and `ffmpeg` are installed and added to your system PATH.
 
 ```bash
-# Install dependencies
+# 1. Install dependencies
 npm install
 
-# Run in development mode
+# 2. Run in development mode
 npm run tauri dev
 
-# Build production bundle
+# 3. Build for production (Windows)
 npm run tauri build
 ```
 
-## License
+## 🔒 Privacy
+Ciel is 100% offline-first. No tracking, no telemetry, no accounts. All download history and settings are stored in a local SQLite database in your app data directory.
+
+## 📄 License
 MIT
