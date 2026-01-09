@@ -79,8 +79,20 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
 
     const handleRefreshList = async () => {
         try {
-            const res = await invoke<DownloadItem[]>("get_downloads");
-            setDownloads(res);
+            const [downloads, settings] = await Promise.all([
+                invoke<DownloadItem[]>("get_downloads"),
+                invoke<{ auto_resume?: string }>("get_settings")
+            ]);
+            setDownloads(downloads);
+
+            // Auto-resume logic: if app was closed while downloading, resume them
+            if (settings.auto_resume === "true") {
+                downloads.forEach((d) => {
+                    if (d.status === "downloading") {
+                        invoke("resume_download", { id: d.id }).catch(console.error);
+                    }
+                });
+            }
         } catch (err) {
             console.error("Failed to fetch downloads:", err);
         }

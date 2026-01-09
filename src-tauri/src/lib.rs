@@ -11,6 +11,7 @@ pub mod downloader;
 pub mod torrent;
 pub mod video;
 pub mod clipboard;
+pub mod tray;
 
 use tauri::Manager;
 
@@ -50,7 +51,6 @@ pub fn run() {
             app.manage(torrent_manager);
 
             // Apply window effects (vibrancy/acrylic on supported platforms)
-            #[cfg(target_os = "windows")]
             {
                 if let Some(window) = app.get_webview_window("main") {
                     use window_vibrancy::apply_mica;
@@ -58,10 +58,23 @@ pub fn run() {
                 }
             }
 
-            // Start clipboard monitor for autocatch
+            // Initialize System Tray
+            tray::create_tray(app.handle()).expect("Failed to create tray");
+
+            // Initialize Notifications
+            app.handle().plugin(tauri_plugin_notification::init())?;
+
+            // Initialize Clipboard Monitor
             clipboard::start_clipboard_monitor(app.handle().clone());
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Minimize to tray instead of quitting
+                window.hide().unwrap();
+                api.prevent_close();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_downloads,

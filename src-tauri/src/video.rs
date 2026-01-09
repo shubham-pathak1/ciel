@@ -1,5 +1,5 @@
 use crate::db::{self, DbState, Download, DownloadStatus, DownloadProtocol};
-use crate::commands::{DownloadManager, resolve_download_path};
+use crate::commands::{DownloadManager, resolve_download_path, ensure_unique_path};
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -119,7 +119,14 @@ pub async fn add_video_download(
         }
     }
 
-    let final_path = resolve_download_path(&app, &db_state.path, &adjusted_filepath, None);
+    let resolved_path = resolve_download_path(&app, &db_state.path, &adjusted_filepath, None);
+    let final_path = ensure_unique_path(resolved_path);
+
+    // Extract the final unique filename from the path
+    let final_filename = std::path::Path::new(&final_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| adjusted_filepath.clone());
     
     // Store specific audio choice in metadata
     let meta_json = serde_json::json!({
@@ -131,7 +138,7 @@ pub async fn add_video_download(
     let download = Download {
         id: id.clone(),
         url: url.clone(),
-        filename: adjusted_filepath.clone(),
+        filename: final_filename,
         filepath: final_path.clone(),
         size: total_size.map(|s| s as i64).unwrap_or(0),
         downloaded: 0,

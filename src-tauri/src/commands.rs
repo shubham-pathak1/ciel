@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 
+use tauri_plugin_notification::NotificationExt;
 
 /// Manager for active downloads
 pub struct DownloadManager {
@@ -39,6 +40,10 @@ impl DownloadManager {
             let _ = tx.send(()).await;
         }
         active.remove(id);
+    }
+
+    pub async fn is_active(&self, id: &str) -> bool {
+        self.active_downloads.lock().await.contains_key(id)
     }
 }
 
@@ -264,11 +269,17 @@ pub async fn add_download(
     let resolved_path = resolve_download_path(&app, &db_state.path, &filename, output_folder);
     let final_resolved_path = ensure_unique_path(resolved_path);
 
+    // Extract the final unique filename from the path
+    let final_filename = Path::new(&final_resolved_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| filename.clone());
+
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
         id: id.clone(),
         url: url.clone(),
-        filename,
+        filename: final_filename,
         filepath: final_resolved_path,
         size: 0,
         downloaded: 0,
@@ -314,14 +325,22 @@ pub async fn add_torrent(
         }
     }
 
+    // Finalize resolved path (Smart Duplicate Handling)
     let resolved_path = resolve_download_path(&app, &db_state.path, &filename, output_folder.clone());
+    let final_resolved_path = ensure_unique_path(resolved_path);
+
+    // Extract the final unique filename from the path
+    let final_filename = Path::new(&final_resolved_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| filename.clone());
 
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
         id: id.clone(),
         url: url.clone(),
-        filename,
-        filepath: resolved_path.clone(),
+        filename: final_filename,
+        filepath: final_resolved_path.clone(),
         size: 0,
         downloaded: 0,
         status: DownloadStatus::Queued,
@@ -341,7 +360,7 @@ pub async fn add_torrent(
     let base_folder = if let Some(folder) = output_folder {
         folder
     } else {
-        Path::new(&resolved_path).parent().unwrap_or(Path::new(".")).to_string_lossy().to_string()
+        Path::new(&final_resolved_path).parent().unwrap_or(Path::new(".")).to_string_lossy().to_string()
     };
     
     torrent_manager.add_magnet(app, id.clone(), url, base_folder, db_state.path.clone(), indices).await?;
@@ -380,6 +399,7 @@ async fn start_download_task(
     let id = download.id.clone();
     let url = download.url.clone();
     let filepath = download.filepath.clone();
+    let filename = download.filename.clone(); // Clone filename for use in tokio::spawn
     let connections = download.connections as u8;
 
     // Create cancellation channel and signal
@@ -413,6 +433,7 @@ async fn start_download_task(
         let id_inner = id.clone();
         let db_path_inner = db_path.clone();
         let app_clone = app.clone();
+        let filename_inner = filename.clone(); // Clone filename for notification
 
         // Wrap download in a select to handle cancellation
         let download_task = downloader.download(move |progress| {
@@ -437,10 +458,24 @@ async fn start_download_task(
                         
                         let _ = db::update_download_status(&db_path_inner, &id_inner, DownloadStatus::Completed);
                         let _ = app.emit("download-completed", id_inner.clone());
+
+                        // Native Notification
+                        app.notification()
+                            .builder()
+                            .title("Download Completed")
+                            .body(format!("{} has finished downloading successfully.", filename_inner))
+                            .show().ok();
                     }
                     Err(e) => {
                         let _ = db::update_download_status(&db_path_inner, &id_inner, DownloadStatus::Error);
                         let _ = app.emit("download-error", (id_inner.clone(), e.to_string()));
+
+                        // Native Notification
+                        app.notification()
+                            .builder()
+                            .title("Download Failed")
+                            .body(format!("Failed to download {}: {}", filename_inner, e))
+                            .show().ok();
                     }
                 }
             }
@@ -505,6 +540,10 @@ pub async fn resume_download(
         return Err("Download already completed".to_string());
     }
 
+    if manager.is_active(&id).await {
+        return Err("Download is already active".to_string());
+    }
+
     db::update_download_status(&db_state.path, &id, DownloadStatus::Downloading).map_err(|e| e.to_string())?;
     db::log_event(&db_state.path, &id, "resumed", None).ok();
 
@@ -563,39 +602,54 @@ pub fn update_setting(db_state: State<DbState>, key: String, value: String) -> R
 
 /// Show file in folder
 #[tauri::command]
-pub fn show_in_folder(path: String) -> Result<(), String> {
+pub fn show_in_folder(app: AppHandle, db_state: State<'_, DbState>, path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let path_norm = path.replace("/", "\\");
-        let p = Path::new(&path_norm);
-        println!("Opening: {}", path_norm);
+        let mut p_buf = PathBuf::from(&path_norm);
+        
+        // Ensure path is absolute
+        if !p_buf.is_absolute() {
+             // Try to get configured download path first
+             let configured_path = db::get_setting(&db_state.path, "download_path")
+                .ok()
+                .flatten()
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from);
+
+             let base = configured_path.unwrap_or_else(|| {
+                 app.path().download_dir().unwrap_or_else(|_| PathBuf::from("."))
+             });
+             
+             p_buf = base.join(p_buf);
+        }
+
+        let p = p_buf.as_path();
         
         if p.exists() {
             if p.is_dir() {
                 // If it's a directory, just open it
                 let _ = std::process::Command::new("explorer.exe")
-                    .arg(&path_norm)
+                    .arg(p)
                     .spawn();
             } else {
                 // If it's a file, select it in its parent folder
+                // We use lossy string conversion to handle potential unicode issues safely
+                let path_str = p.to_string_lossy().to_string();
                 let _ = std::process::Command::new("explorer.exe")
-                    .arg(format!("/select,\"{}\"", path_norm))
+                    .arg("/select,")
+                    .arg(path_str)
                     .spawn();
             }
         } else {
             // If the specific file doesn't exist (e.g. download in progress),
             // try opening its parent directory
-            let parent = p.parent().unwrap_or_else(|| Path::new("C:\\"));
-            if parent.exists() {
-                println!("File not found, opening parent: {:?}", parent);
-                let _ = std::process::Command::new("explorer.exe")
-                    .arg(parent)
-                    .spawn();
-            } else {
-                // Last ditch: open current dir
-                let _ = std::process::Command::new("explorer.exe")
-                    .arg(".")
-                    .spawn();
+            if let Some(parent) = p.parent() {
+                if parent.exists() {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(parent)
+                        .spawn();
+                }
             }
         }
     }
