@@ -167,6 +167,35 @@ pub(crate) fn resolve_download_path(app: &tauri::AppHandle, db_path: &str, provi
     absolute_path.to_string_lossy().to_string()
 }
 
+/// Helper to ensure unique filename if file already exists
+pub(crate) fn ensure_unique_path(path_str: String) -> String {
+    let path = Path::new(&path_str);
+    if !path.exists() {
+        return path_str;
+    }
+
+    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+    let extension = path.extension().and_then(|s| s.to_str());
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut counter = 1;
+    loop {
+        let new_filename = match extension {
+            Some(ext) => format!("{} ({}).{}", file_stem, counter, ext),
+            None => format!("{} ({})", file_stem, counter),
+        };
+        let new_path = parent.join(&new_filename);
+        if !new_path.exists() {
+            return new_path.to_string_lossy().to_string();
+        }
+        counter += 1;
+        // Safety break to prevent infinite loops in degenerate cases
+        if counter > 10000 {
+             return path_str;
+        }
+    }
+}
+
 /// Get all downloads
 #[tauri::command]
 pub fn get_downloads(db_state: State<DbState>) -> Result<Vec<Download>, String> {
@@ -232,7 +261,8 @@ pub async fn add_download(
     }
 
     // Finalize resolved path using the potentially updated filename and optional folder override
-    let final_resolved_path = resolve_download_path(&app, &db_state.path, &filename, output_folder);
+    let resolved_path = resolve_download_path(&app, &db_state.path, &filename, output_folder);
+    let final_resolved_path = ensure_unique_path(resolved_path);
 
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
