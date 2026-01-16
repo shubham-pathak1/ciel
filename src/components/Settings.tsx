@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import logo from "../assets/logo.png";
-import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText } from "lucide-react";
+import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText, Zap } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -13,6 +13,10 @@ interface SettingsState {
     ask_location: string;
     autocatch_enabled: string;
     speed_limit: string;
+    torrent_encryption: string;
+    open_folder_on_finish: string;
+    shutdown_on_finish: string;
+    sound_on_finish: string;
 }
 
 export function Settings() {
@@ -24,6 +28,10 @@ export function Settings() {
         ask_location: "false",
         autocatch_enabled: "true",
         speed_limit: "0",
+        torrent_encryption: "false",
+        open_folder_on_finish: "false",
+        shutdown_on_finish: "false",
+        sound_on_finish: "true",
     });
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
@@ -45,6 +53,10 @@ export function Settings() {
                 ask_location: result.ask_location || "false",
                 autocatch_enabled: result.autocatch_enabled || "true",
                 speed_limit: result.speed_limit || "0",
+                torrent_encryption: result.torrent_encryption || "false",
+                open_folder_on_finish: result.open_folder_on_finish || "false",
+                shutdown_on_finish: result.shutdown_on_finish || "false",
+                sound_on_finish: result.sound_on_finish || "true",
             });
 
             // Check for active downloads
@@ -100,6 +112,7 @@ export function Settings() {
         { id: "general", title: "General", icon: Folder },
         { id: "network", title: "Network", icon: Globe },
         { id: "performance", title: "Performance", icon: Gauge },
+        { id: "automation", title: "Automation", icon: Zap },
         { id: "privacy", title: "Privacy", icon: Shield },
         { id: "about", title: "About", icon: Info },
     ];
@@ -251,6 +264,67 @@ export function Settings() {
                         </div>
                     </div>
                 );
+            case "automation":
+                return (
+                    <div className="space-y-8 animate-fade-in">
+                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
+                            <div>
+                                <h4 className="text-base font-medium text-text-primary mb-1">Open folder on finish</h4>
+                                <p className="text-xs text-text-tertiary">Automatically open the download folder and select the file when completed.</p>
+                            </div>
+                            <button
+                                onClick={() => handleChange("open_folder_on_finish", settings.open_folder_on_finish === "true" ? "false" : "true")}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
+                                    settings.open_folder_on_finish === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                )}
+                            >
+                                <div className={clsx(
+                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
+                                    settings.open_folder_on_finish === "true" ? 'translate-x-7' : 'translate-x-1'
+                                )} />
+                            </button>
+                        </div>
+
+                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
+                            <div>
+                                <h4 className="text-base font-medium text-text-primary mb-1">Shutdown when done</h4>
+                                <p className="text-xs text-text-tertiary">Shutdown the PC automatically after all active downloads are finished.</p>
+                            </div>
+                            <button
+                                onClick={() => handleChange("shutdown_on_finish", settings.shutdown_on_finish === "true" ? "false" : "true")}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
+                                    settings.shutdown_on_finish === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                )}
+                            >
+                                <div className={clsx(
+                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
+                                    settings.shutdown_on_finish === "true" ? 'translate-x-7' : 'translate-x-1'
+                                )} />
+                            </button>
+                        </div>
+
+                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
+                            <div>
+                                <h4 className="text-base font-medium text-text-primary mb-1">Sound Notifications</h4>
+                                <p className="text-xs text-text-tertiary">Play a subtle sound when a download task completes.</p>
+                            </div>
+                            <button
+                                onClick={() => handleChange("sound_on_finish", settings.sound_on_finish === "true" ? "false" : "true")}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
+                                    settings.sound_on_finish === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                )}
+                            >
+                                <div className={clsx(
+                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
+                                    settings.sound_on_finish === "true" ? 'translate-x-7' : 'translate-x-1'
+                                )} />
+                            </button>
+                        </div>
+                    </div>
+                );
             case "privacy":
                 return (
                     <div className="space-y-8 animate-fade-in">
@@ -269,6 +343,25 @@ export function Settings() {
                                 <div className={clsx(
                                     "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
                                     settings.autocatch_enabled === "true" ? 'translate-x-7' : 'translate-x-1'
+                                )} />
+                            </button>
+                        </div>
+
+                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
+                            <div>
+                                <h4 className="text-base font-medium text-text-primary mb-1">Force Encryption (PE)</h4>
+                                <p className="text-xs text-text-tertiary">Obfuscate torrent traffic to bypass ISP throttling. <span className="text-status-warning opacity-80">(Requires Restart)</span></p>
+                            </div>
+                            <button
+                                onClick={() => handleChange("torrent_encryption", settings.torrent_encryption === "true" ? "false" : "true")}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
+                                    settings.torrent_encryption === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                )}
+                            >
+                                <div className={clsx(
+                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
+                                    settings.torrent_encryption === "true" ? 'translate-x-7' : 'translate-x-1'
                                 )} />
                             </button>
                         </div>

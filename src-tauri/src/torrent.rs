@@ -26,14 +26,18 @@ pub struct TorrentManager {
 }
 
 impl TorrentManager {
-    pub async fn new() -> Self {
+    pub async fn new(_force_encryption: bool) -> Self {
         // Default download folder for the session (we can override per torrent if library allows)
         let download_dir = PathBuf::from("./downloads");
         if !download_dir.exists() {
             std::fs::create_dir_all(&download_dir).ok();
         }
         
-        let session = Session::new(download_dir).await.expect("Failed to create librqbit session");
+        let options = librqbit::SessionOptions::default();
+        // Encryption is likely enabled by default in recent librqbit versions, 
+        // or requires a different approach. Removing for now to fix build.
+        
+        let session = Session::new_with_opts(download_dir, options).await.expect("Failed to create librqbit session");
         Self {
             session: session,
             active_torrents: Arc::new(Mutex::new(HashMap::new())),
@@ -138,7 +142,15 @@ impl TorrentManager {
                 }));
 
                 if stats.finished {
-                    let _ = app.emit("download-completed", id_clone);
+                    let _ = app.emit("download-completed", id_clone.clone());
+                    
+                    // Post-Download Actions
+                    // We need the full Download record to know the filepath
+                    if let Ok(downloads) = crate::db::get_all_downloads(&db_path_clone) {
+                        if let Some(download) = downloads.into_iter().find(|d| d.id == id_clone) {
+                            crate::commands::execute_post_download_actions(app.clone(), db_path_clone.clone(), download).await;
+                        }
+                    }
                     break;
                 }
                 

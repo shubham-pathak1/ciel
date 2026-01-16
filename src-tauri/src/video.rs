@@ -1,5 +1,5 @@
 use crate::db::{self, DbState, Download, DownloadStatus, DownloadProtocol};
-use crate::commands::{DownloadManager, resolve_download_path, ensure_unique_path};
+use crate::commands::{DownloadManager, resolve_download_path, ensure_unique_path, execute_post_download_actions};
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -102,6 +102,8 @@ pub async fn add_video_download(
     audio_id: Option<String>,
     total_size: Option<u64>,
     filepath: String,
+    user_agent: Option<String>,
+    cookies: Option<String>,
 ) -> Result<(), String> {
     let id = uuid::Uuid::new_v4().to_string();
     
@@ -151,6 +153,8 @@ pub async fn add_video_download(
         error_message: None,
         info_hash: None,
         metadata: Some(meta_json.to_string()),
+        user_agent,
+        cookies,
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
@@ -243,7 +247,7 @@ pub async fn start_video_download_task(
         let mut reader = BufReader::new(stdout).lines();
 
         // Initial total from metadata if available
-        let expected_total_size = if let Some(meta_str) = download.metadata {
+        let expected_total_size = if let Some(ref meta_str) = download.metadata {
              if let Ok(json) = serde_json::from_str::<serde_json::Value>(&meta_str) {
                  json["total_size"].as_u64().unwrap_or(0)
              } else { 0 }
@@ -386,6 +390,10 @@ pub async fn start_video_download_task(
                 
                 let _ = db::update_download_status(&db_path_clone, &id_clone, DownloadStatus::Completed);
                 let _ = app_clone.emit("download-completed", id_clone.clone());
+
+                // Post-Download Actions
+                let download_clone = download.clone();
+                execute_post_download_actions(app_clone.clone(), db_path_clone.clone(), download_clone).await;
             } else {
                 let _ = db::update_download_status(&db_path_clone, &id_clone, DownloadStatus::Error);
                 let _ = app_clone.emit("download-error", (id_clone.clone(), "yt-dlp failed"));

@@ -98,6 +98,30 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
         }
     };
 
+    const playSuccessSound = () => {
+        try {
+            const context = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const oscillator = context.createOscillator();
+            const gain = context.createGain();
+
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(587.33, context.currentTime); // D5
+            oscillator.frequency.exponentialRampToValueAtTime(880.00, context.currentTime + 0.1); // A5
+
+            gain.gain.setValueAtTime(0, context.currentTime);
+            gain.gain.linearRampToValueAtTime(0.2, context.currentTime + 0.05);
+            gain.gain.exponentialRampToValueAtTime(0.01, context.currentTime + 0.4);
+
+            oscillator.connect(gain);
+            gain.connect(context.destination);
+
+            oscillator.start(context.currentTime);
+            oscillator.stop(context.currentTime + 0.4);
+        } catch (e) {
+            console.error("Failed to play sound:", e);
+        }
+    };
+
     useEffect(() => {
         handleRefreshList();
 
@@ -122,8 +146,16 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
             );
         });
 
-        const unlistenCompleted = listen<string>("download-completed", () => {
+        const unlistenCompleted = listen<string>("download-completed", async () => {
             handleRefreshList();
+            try {
+                const settings = await invoke<Record<string, string>>("get_settings");
+                if (settings.sound_on_finish === "true") {
+                    playSuccessSound();
+                }
+            } catch (err) {
+                console.error("Failed to check sound setting:", err);
+            }
         });
 
         const unlistenName = listen<{ id: string; filename: string }>("download-name-updated", (event) => {
@@ -381,6 +413,9 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     const [status, setStatus] = useState<string | null>(null);
     const [torrentInfo, setTorrentInfo] = useState<TorrentInfo | null>(null);
     const [videoMetadata, setVideoMetadata] = useState<any | null>(null);
+    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [userAgent, setUserAgent] = useState("");
+    const [cookies, setCookies] = useState("");
 
     useEffect(() => {
         const checkClipboard = async () => {
@@ -429,7 +464,13 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                 setTorrentInfo(info);
                 setStatus(null);
             } else {
-                await invoke("add_download", { url, filename: typeInfo.hinted_filename || "download", filepath: "" });
+                await invoke("add_download", {
+                    url,
+                    filename: typeInfo.hinted_filename || "download",
+                    filepath: "",
+                    userAgent: userAgent || null,
+                    cookies: cookies || null
+                });
                 onAdded();
                 onClose();
             }
@@ -501,6 +542,47 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                                     className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
                                     onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
                                 />
+
+                                <div className="pt-2">
+                                    <button
+                                        onClick={() => setShowAdvanced(!showAdvanced)}
+                                        className="text-[10px] items-center gap-1.5 uppercase font-bold tracking-wider text-text-tertiary hover:text-text-secondary transition-colors inline-flex mb-3"
+                                    >
+                                        <div className={clsx("w-1 h-3 rounded-full bg-brand-tertiary", showAdvanced && "bg-text-secondary")} />
+                                        Advanced Settings
+                                    </button>
+
+                                    <AnimatePresence>
+                                        {showAdvanced && (
+                                            <motion.div
+                                                initial={{ height: 0, opacity: 0 }}
+                                                animate={{ height: "auto", opacity: 1 }}
+                                                exit={{ height: 0, opacity: 0 }}
+                                                className="overflow-hidden space-y-4"
+                                            >
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] text-text-tertiary ml-1 uppercase tracking-widest font-bold">User-Agent</label>
+                                                    <input
+                                                        type="text"
+                                                        value={userAgent}
+                                                        onChange={(e) => setUserAgent(e.target.value)}
+                                                        placeholder="Mozilla/5.0..."
+                                                        className="w-full bg-brand-primary border border-surface-border rounded-lg px-3 py-2 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-xs"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] text-text-tertiary ml-1 uppercase tracking-widest font-bold">Cookies (Raw String)</label>
+                                                    <textarea
+                                                        value={cookies}
+                                                        onChange={(e) => setCookies(e.target.value)}
+                                                        placeholder="session=...; _uid=..."
+                                                        className="w-full h-20 bg-brand-primary border border-surface-border rounded-lg px-3 py-2 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-xs resize-none"
+                                                    />
+                                                </div>
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                </div>
                                 {status && (
                                     <div className="text-xs p-3 rounded-lg bg-brand-tertiary text-text-secondary flex items-center gap-2">
                                         <DatabaseIcon size={14} />

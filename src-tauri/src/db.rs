@@ -93,6 +93,8 @@ pub struct Download {
     pub error_message: Option<String>,
     pub info_hash: Option<String>,
     pub metadata: Option<String>,
+    pub user_agent: Option<String>,
+    pub cookies: Option<String>,
 }
 
 /// Initialize the database with schema
@@ -117,9 +119,19 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             completed_at TEXT,
             error_message TEXT,
             info_hash TEXT,
-            metadata TEXT
+            metadata TEXT,
+            user_agent TEXT,
+            cookies TEXT
         );
+        "
+    )?;
 
+    // Migrations
+    let _ = conn.execute("ALTER TABLE downloads ADD COLUMN user_agent TEXT ", []);
+    let _ = conn.execute("ALTER TABLE downloads ADD COLUMN cookies TEXT ", []);
+
+    conn.execute_batch(
+        "
         -- Settings table (key-value store)
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -162,8 +174,12 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('notifications', 'true'),
             ('speed_limit', '0'),
             ('autocatch_enabled', 'true'),
+            ('torrent_encryption', 'false'),
+            ('open_folder_on_finish', 'false'),
+            ('shutdown_on_finish', 'false'),
+            ('sound_on_finish', 'true'),
             ('theme', 'dark');
-        ",
+        "
     )?;
 
     // Migration: Add metadata column to downloads table if it doesn't exist
@@ -185,7 +201,7 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
         }
 
         if !has_metadata {
-            conn.execute("ALTER TABLE downloads ADD COLUMN metadata TEXT", [])?;
+            conn.execute("ALTER TABLE downloads ADD COLUMN metadata TEXT ", [])?;
         }
     }
 
@@ -196,9 +212,9 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
 pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata 
+        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies 
          FROM downloads 
-         ORDER BY created_at DESC",
+         ORDER BY created_at DESC "
     )?;
 
     let downloads = stmt
@@ -219,6 +235,8 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
                 error_message: row.get(12)?,
                 info_hash: row.get(13)?,
                 metadata: row.get(14)?,
+                user_agent: row.get(15)?,
+                cookies: row.get(16)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -230,10 +248,10 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
 pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata 
+        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies 
          FROM downloads 
          WHERE status = 'completed'
-         ORDER BY completed_at DESC",
+         ORDER BY completed_at DESC "
     )?;
 
     let downloads = stmt
@@ -254,6 +272,8 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
                 error_message: row.get(12)?,
                 info_hash: row.get(13)?,
                 metadata: row.get(14)?,
+                user_agent: row.get(15)?,
+                cookies: row.get(16)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -265,9 +285,9 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
 pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> SqliteResult<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "INSERT INTO downloads (id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-        (
+        "INSERT INTO downloads (id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) ",
+        rusqlite::params![
             &download.id,
             &download.url,
             &download.filename,
@@ -283,7 +303,9 @@ pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> Sqlit
             &download.error_message,
             &download.info_hash,
             &download.metadata,
-        ),
+            &download.user_agent,
+            &download.cookies,
+        ],
     )?;
     Ok(())
 }
@@ -395,12 +417,13 @@ pub fn get_download_chunks<P: AsRef<Path>>(db_path: P, download_id: &str) -> Sql
     Ok(chunks)
 }
 
+
 /// Get all settings as key-value pairs
 pub fn get_all_settings<P: AsRef<Path>>(
     db_path: P,
 ) -> SqliteResult<std::collections::HashMap<String, String>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+    let mut stmt = conn.prepare("SELECT key, value FROM settings ")?;
     let settings = stmt
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
@@ -430,7 +453,7 @@ pub fn get_download_events<P: AsRef<Path>>(
 ) -> SqliteResult<Vec<(String, String, Option<String>)>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT event_type, timestamp, details FROM history WHERE download_id = ?1 ORDER BY timestamp DESC",
+        "SELECT event_type, timestamp, details FROM history WHERE download_id = ?1 ORDER BY timestamp DESC "
     )?;
 
     let events = stmt

@@ -56,6 +56,10 @@ pub struct DownloadConfig {
     pub chunk_size: u64,
     /// Speed limit in bytes per second (0 = unlimited)
     pub speed_limit: u64,
+    /// Custom User-Agent
+    pub user_agent: Option<String>,
+    /// Custom Cookies
+    pub cookies: Option<String>,
 }
 
 impl Default for DownloadConfig {
@@ -67,6 +71,8 @@ impl Default for DownloadConfig {
             connections: 8,
             chunk_size: 5 * 1024 * 1024, // 5 MB
             speed_limit: 0,
+            user_agent: None,
+            cookies: None,
         }
     }
 }
@@ -129,11 +135,26 @@ impl Downloader {
             speed_limit: config.speed_limit,
         }));
 
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .tcp_nodelay(true)
-            .build()
-            .unwrap_or_default();
+            .tcp_nodelay(true);
+
+        if let Some(ref ua) = config.user_agent {
+            builder = builder.user_agent(ua);
+        } else {
+            builder = builder.user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        }
+
+        if let Some(ref cookies) = config.cookies {
+            use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
+            let mut headers = HeaderMap::new();
+            if let Ok(v) = HeaderValue::from_str(cookies) {
+                headers.insert(COOKIE, v);
+                builder = builder.default_headers(headers);
+            }
+        }
+
+        let client = builder.build().unwrap_or_default();
 
         Self {
             client,

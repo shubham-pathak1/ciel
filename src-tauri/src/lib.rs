@@ -45,9 +45,16 @@ pub fn run() {
 
             // Initialize and manage DownloadManager
             app.manage(commands::DownloadManager::new());
+            
+            // Read torrent encryption setting
+            let force_encryption = db::get_setting(&db_path, "torrent_encryption")
+                .ok()
+                .flatten()
+                .map(|v| v == "true")
+                .unwrap_or(false);
 
             // Initialize and manage TorrentManager
-            let torrent_manager = tauri::async_runtime::block_on(torrent::TorrentManager::new());
+            let torrent_manager = tauri::async_runtime::block_on(torrent::TorrentManager::new(force_encryption));
             app.manage(torrent_manager);
 
             // Apply window effects (vibrancy/acrylic on supported platforms)

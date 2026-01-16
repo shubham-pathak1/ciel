@@ -225,6 +225,63 @@ pub(crate) fn ensure_unique_path(path_str: String) -> String {
     }
 }
 
+
+/// Execute post-download actions (Open folder, Shutdown, etc.)
+pub (crate) async fn execute_post_download_actions(app: AppHandle, db_path: String, download: Download) {
+    // 1. Open Folder on Finish
+    let open_folder = db::get_setting(&db_path, "open_folder_on_finish")
+        .ok()
+        .flatten()
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
+    if open_folder {
+        // Use the internal helper that doesn't require State
+        let _ = show_in_folder_internal(app, &db_path, download.filepath.clone());
+    }
+
+    // 2. Sound notification (handled by frontend or system toast by default, but we can add more if needed)
+
+    // 3. Shutdown on Finish
+    let shutdown_enabled = db::get_setting(&db_path, "shutdown_on_finish")
+        .ok()
+        .flatten()
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
+    if shutdown_enabled {
+        // Check if there are ANY other active downloads
+        if let Ok(downloads) = db::get_all_downloads(&db_path) {
+            let active_count = downloads.iter()
+                .filter(|d| d.id != download.id) // Exclude current one as it might still be in 'Downloading' status during this call
+                .filter(|d| d.status == db::DownloadStatus::Downloading)
+                .count();
+
+            if active_count == 0 {
+                // All downloads finished! Trigger shutdown.
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("shutdown")
+                        .args(&["/s", "/t", "60", "/c", "Ciel: All downloads finished. Shutting down in 60s."])
+                        .spawn();
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("shutdown")
+                        .args(&["+1"])
+                        .spawn();
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("shutdown")
+                        .args(&["-h", "+1"])
+                        .spawn();
+                }
+            }
+        }
+    }
+}
+
 /// Get all downloads
 #[tauri::command]
 pub fn get_downloads(db_state: State<DbState>) -> Result<Vec<Download>, String> {
@@ -241,6 +298,8 @@ pub async fn add_download(
     filename: String,
     _filepath: String,
     output_folder: Option<String>,
+    user_agent: Option<String>,
+    cookies: Option<String>,
 ) -> Result<Download, String> {
 
     // Get max connections from settings
@@ -258,11 +317,25 @@ pub async fn add_download(
     let looks_like_hash = filename.len() > 15 && !filename.contains(' ') && !has_ext;
 
     if (is_generic || looks_like_hash || !has_ext) && url.starts_with("http") {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .build()
-            .unwrap_or_default();
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5));
+            
+        if let Some(ref ua) = user_agent {
+            builder = builder.user_agent(ua);
+        } else {
+            builder = builder.user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        }
+
+        if let Some(ref c) = cookies {
+            use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
+            let mut headers = HeaderMap::new();
+            if let Ok(v) = HeaderValue::from_str(c) {
+                headers.insert(COOKIE, v);
+                builder = builder.default_headers(headers);
+            }
+        }
+
+        let client = builder.build().unwrap_or_default();
             
         let mut found_name = None;
         
@@ -316,6 +389,8 @@ pub async fn add_download(
         error_message: None,
         info_hash: None,
         metadata: None,
+        user_agent,
+        cookies,
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
@@ -376,6 +451,8 @@ pub async fn add_torrent(
         error_message: None,
         info_hash: None,
         metadata: None,
+        user_agent: None,
+        cookies: None,
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
@@ -448,6 +525,8 @@ async fn start_download_task(
             connections,
             chunk_size: 5 * 1024 * 1024,
             speed_limit,
+            user_agent: download.user_agent.clone(),
+            cookies: download.cookies.clone(),
         };
 
         let downloader = Downloader::new(config)
@@ -489,6 +568,10 @@ async fn start_download_task(
                             .title("Download Completed")
                             .body(format!("{} has finished downloading successfully.", filename_inner))
                             .show().ok();
+
+                        // Post-Download Actions
+                        let download_clone = download.clone();
+                        execute_post_download_actions(app.clone(), db_path_inner.clone(), download_clone).await;
                     }
                     Err(e) => {
                         let _ = db::update_download_status(&db_path_inner, &id_inner, DownloadStatus::Error);
@@ -627,6 +710,10 @@ pub fn update_setting(db_state: State<DbState>, key: String, value: String) -> R
 /// Show file in folder
 #[tauri::command]
 pub fn show_in_folder(app: AppHandle, db_state: State<'_, DbState>, path: String) -> Result<(), String> {
+    show_in_folder_internal(app, &db_state.path, path)
+}
+
+pub fn show_in_folder_internal(app: AppHandle, db_path: &str, path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let path_norm = path.replace("/", "\\");
@@ -635,7 +722,7 @@ pub fn show_in_folder(app: AppHandle, db_state: State<'_, DbState>, path: String
         // Ensure path is absolute
         if !p_buf.is_absolute() {
              // Try to get configured download path first
-             let configured_path = db::get_setting(&db_state.path, "download_path")
+             let configured_path = db::get_setting(&db_path, "download_path")
                 .ok()
                 .flatten()
                 .filter(|p| !p.is_empty())
