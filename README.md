@@ -29,6 +29,16 @@ Ciel is designed for users who demand extreme speed, privacy, and a distraction-
 - **Selective Fetching**: Preview torrent contents and select only the files you need.
 - **Metadata Polling**: Robust analysis of magnet links before the download begins.
 
+### 🎭 Expert Session Control
+- **Session Hijacking**: Provide custom Cookies and User-Agents to bypass `403 Forbidden` and bot protection on premium file hosts.
+- **Header Persistence**: Custom headers are saved per task, ensuring seamless pause/resume and retries.
+- **Full Spoofing**: Custom headers are applied during both site analysis and the actual multi-threaded download phase.
+
+### 🤖 Smart Automation
+- **Auto-Shutdown**: Optional system shutdown after the entire download queue is completed—ideal for large overnight batches.
+- **Intelligent Focus**: "Open Folder on Finish" automatically reveals and selects the file in Windows Explorer as soon as it's ready.
+- **Sound Notifications**: Subtle, premium audio feedback for task completion (toggable in settings).
+
 ### 🎨 Premium Desktop Experience
 - **Fluid UI**: Built with React & Framer Motion for smooth, layout-aware transitions.
 - **Native Look**: Deep Windows integration with Mica effect, custom title bars, and "Show in Folder" shortcuts.
