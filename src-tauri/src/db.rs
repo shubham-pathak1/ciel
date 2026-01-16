@@ -441,3 +441,18 @@ pub fn get_download_events<P: AsRef<Path>>(
 
     Ok(events)
 }
+
+/// Delete all finished (completed or error) downloads
+pub fn delete_finished_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "DELETE FROM downloads WHERE status = 'completed' OR status = 'error'",
+        [],
+    )?;
+    
+    // Also cleanup related chunks and history
+    let _ = conn.execute("DELETE FROM chunks WHERE download_id NOT IN (SELECT id FROM downloads)", []);
+    let _ = conn.execute("DELETE FROM history WHERE download_id NOT IN (SELECT id FROM downloads)", []);
+    
+    Ok(())
+}

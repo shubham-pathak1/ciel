@@ -143,6 +143,7 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
         };
     }, []);
 
+
     const filteredDownloads = downloads.filter((d) => {
         if (filter === "active") return d.status === "downloading" || d.status === "queued";
         if (filter === "completed") return d.status === "completed";
@@ -337,7 +338,9 @@ const DownloadCard = React.forwardRef<HTMLDivElement, { download: DownloadItem, 
                                     <span className="text-white font-medium animate-pulse">{download.status_text}</span>
                                 )}
                                 {!download.status_text && (
-                                    <span>{formatSize(download.downloaded)} / {formatSize(download.size)}</span>
+                                    <span className="font-medium tracking-wide">
+                                        {formatSize(download.downloaded)} <span className="text-text-tertiary font-normal px-1">of</span> {formatSize(download.size)}
+                                    </span>
                                 )}
 
                                 {download.status === 'downloading' && !download.status_text && (
@@ -357,7 +360,7 @@ const DownloadCard = React.forwardRef<HTMLDivElement, { download: DownloadItem, 
                                 {download.status === 'downloading' && (
                                     <div className="flex items-center gap-1 text-text-tertiary">
                                         <Clock size={10} />
-                                        <span className="font-mono">{formatEta(download.eta)}</span>
+                                        <span className="font-mono text-[10px] tracking-tight">{formatEta(download.eta)} remaining</span>
                                     </div>
                                 )}
                                 <span className={clsx("font-medium", getStatusColor())}>

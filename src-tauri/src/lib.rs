@@ -93,6 +93,7 @@ pub fn run() {
             commands::get_settings,
             commands::update_setting,
             commands::show_in_folder,
+            commands::clear_finished,
             clipboard::get_clipboard,
         ])
         .run(tauri::generate_context!())

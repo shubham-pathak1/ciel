@@ -719,3 +719,9 @@ impl Clone for DownloadManager {
         }
     }
 }
+
+/// Clear finished downloads
+#[tauri::command]
+pub fn clear_finished(db_state: State<DbState>) -> Result<(), String> {
+    db::delete_finished_downloads(&db_state.path).map_err(|e| e.to_string())
+}
