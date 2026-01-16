@@ -108,7 +108,7 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
             caps.get(1).or(caps.get(2)).map(|m| m.as_str().to_string())
         });
 
-    // If content-type is generic or missing, try to sniff magic bytes
+    // 3. If content-type is generic or missing, try to sniff magic bytes
     if content_type.as_deref().map_or(true, |ct| ct == "application/octet-stream" || ct == "application/x-zip-compressed") {
         if let Ok(range_res) = client.get(&url).header("Range", "bytes=0-3").send().await {
             if let Ok(bytes) = range_res.bytes().await {
@@ -119,11 +119,35 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
         }
     }
 
+    // 4. If we have a filename but no extension, try to append one based on Content-Type
+    let mut final_filename = hinted_filename;
+    if let Some(ref name) = final_filename {
+        if !name.contains('.') {
+            if let Some(ref ct) = content_type {
+                let ext = match ct.as_str() {
+                    "application/zip" | "application/x-zip-compressed" => Some(".zip"),
+                    "application/x-rar-compressed" | "application/vnd.rar" => Some(".rar"),
+                    "application/x-7z-compressed" => Some(".7z"),
+                    "video/mp4" => Some(".mp4"),
+                    "video/x-matroska" => Some(".mkv"),
+                    "image/jpeg" => Some(".jpg"),
+                    "image/png" => Some(".png"),
+                    "application/pdf" => Some(".pdf"),
+                    "audio/mpeg" => Some(".mp3"),
+                    _ => None,
+                };
+                if let Some(e) = ext {
+                    final_filename = Some(format!("{}{}", name, e));
+                }
+            }
+        }
+    }
+
     Ok(UrlTypeInfo {
         is_magnet: false,
         content_type,
         content_length,
-        hinted_filename,
+        hinted_filename: final_filename,
     })
 }
 
