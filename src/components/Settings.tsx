@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import logo from "../assets/logo.png";
-import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText, Zap, Clock } from "lucide-react";
+import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText, Cpu, Clock } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -8,12 +8,12 @@ import { open } from "@tauri-apps/plugin-dialog";
 interface SettingsState {
     download_path: string;
     max_connections: string;
-    auto_resume: string;
+    auto_resume: boolean;
     theme: string;
-    ask_location: string;
-    autocatch_enabled: string;
+    ask_location: boolean;
+    autocatch_enabled: boolean;
     speed_limit: string;
-    torrent_encryption: string;
+    torrent_encryption: boolean;
     open_folder_on_finish: boolean;
     shutdown_on_finish: boolean;
     sound_on_finish: boolean;
@@ -26,12 +26,12 @@ export function Settings() {
     const [settings, setSettings] = useState<SettingsState>({
         download_path: "./downloads",
         max_connections: "8",
-        auto_resume: "true",
+        auto_resume: true,
         theme: "dark",
-        ask_location: "false",
-        autocatch_enabled: "true",
+        ask_location: false,
+        autocatch_enabled: true,
         speed_limit: "0",
-        torrent_encryption: "false",
+        torrent_encryption: false,
         open_folder_on_finish: false,
         shutdown_on_finish: false,
         sound_on_finish: true,
@@ -54,12 +54,12 @@ export function Settings() {
             setSettings({
                 download_path: result.download_path || "./downloads",
                 max_connections: result.max_connections || "8",
-                auto_resume: result.auto_resume || "true",
+                auto_resume: result.auto_resume === "true",
                 theme: result.theme || "dark",
-                ask_location: result.ask_location || "false",
-                autocatch_enabled: result.autocatch_enabled || "true",
+                ask_location: result.ask_location === "true",
+                autocatch_enabled: result.autocatch_enabled === "true",
                 speed_limit: result.speed_limit || "0",
-                torrent_encryption: result.torrent_encryption || "false",
+                torrent_encryption: result.torrent_encryption === "true",
                 open_folder_on_finish: result.open_folder_on_finish === "true",
                 shutdown_on_finish: result.shutdown_on_finish === "true",
                 sound_on_finish: result.sound_on_finish === "true",
@@ -123,7 +123,7 @@ export function Settings() {
         { id: "general", title: "General", icon: Folder },
         { id: "network", title: "Network", icon: Globe },
         { id: "performance", title: "Performance", icon: Gauge },
-        { id: "automation", title: "Automation", icon: Zap },
+        { id: "automation", title: "Automation", icon: Cpu },
         { id: "privacy", title: "Privacy", icon: Shield },
         { id: "about", title: "About", icon: Info },
     ];
@@ -158,15 +158,15 @@ export function Settings() {
                                 <p className="text-xs text-text-tertiary">Select download location manually for every new task.</p>
                             </div>
                             <button
-                                onClick={() => handleChange("ask_location", settings.ask_location === "true" ? "false" : "true")}
+                                onClick={() => handleChange("ask_location", !settings.ask_location)}
                                 className={clsx(
                                     "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.ask_location === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                    settings.ask_location ? 'bg-text-primary' : 'bg-brand-tertiary'
                                 )}
                             >
                                 <div className={clsx(
                                     "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.ask_location === "true" ? 'translate-x-7' : 'translate-x-1'
+                                    settings.ask_location ? 'translate-x-7' : 'translate-x-1'
                                 )} />
                             </button>
                         </div>
@@ -261,15 +261,15 @@ export function Settings() {
                                 <p className="text-xs text-text-tertiary">Automatically resume interrupted downloads when app starts.</p>
                             </div>
                             <button
-                                onClick={() => handleChange("auto_resume", settings.auto_resume === "true" ? "false" : "true")}
+                                onClick={() => handleChange("auto_resume", !settings.auto_resume)}
                                 className={clsx(
                                     "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.auto_resume === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                    settings.auto_resume ? 'bg-text-primary' : 'bg-brand-tertiary'
                                 )}
                             >
                                 <div className={clsx(
                                     "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.auto_resume === "true" ? 'translate-x-7' : 'translate-x-1'
+                                    settings.auto_resume ? 'translate-x-7' : 'translate-x-1'
                                 )} />
                             </button>
                         </div>
@@ -321,12 +321,18 @@ export function Settings() {
                                 <h4 className="text-base font-medium text-text-primary mb-1">Sound Notifications</h4>
                                 <p className="text-xs text-text-tertiary">Play a subtle sound when a download task completes.</p>
                             </div>
-                            <input
-                                type="checkbox"
-                                className="checkbox-custom"
-                                checked={settings.sound_on_finish}
-                                onChange={(e) => handleChange('sound_on_finish', e.target.checked)}
-                            />
+                            <button
+                                onClick={() => handleChange('sound_on_finish', !settings.sound_on_finish)}
+                                className={clsx(
+                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
+                                    settings.sound_on_finish ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                )}
+                            >
+                                <div className={clsx(
+                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
+                                    settings.sound_on_finish ? 'translate-x-7' : 'translate-x-1'
+                                )} />
+                            </button>
                         </div>
 
                         <div className="pt-4 border-t border-brand-tertiary/20">
@@ -341,12 +347,18 @@ export function Settings() {
                                         <span className="text-sm font-medium text-text-primary tracking-tight">Enable Scheduler</span>
                                         <span className="text-xs text-text-tertiary">Automatically manage downloads based on time</span>
                                     </div>
-                                    <input
-                                        type="checkbox"
-                                        className="checkbox-custom"
-                                        checked={settings.scheduler_enabled}
-                                        onChange={(e) => handleChange('scheduler_enabled', e.target.checked)}
-                                    />
+                                    <button
+                                        onClick={() => handleChange('scheduler_enabled', !settings.scheduler_enabled)}
+                                        className={clsx(
+                                            "w-12 h-6 rounded-full transition-all duration-300 relative",
+                                            settings.scheduler_enabled ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                        )}
+                                    >
+                                        <div className={clsx(
+                                            "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
+                                            settings.scheduler_enabled ? 'translate-x-7' : 'translate-x-1'
+                                        )} />
+                                    </button>
                                 </div>
 
                                 {settings.scheduler_enabled && (
@@ -355,7 +367,7 @@ export function Settings() {
                                             <label className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Start Time</label>
                                             <input
                                                 type="time"
-                                                className="input-base text-sm py-2"
+                                                className="w-full bg-brand-tertiary border border-surface-border rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-white/20 transition-all [color-scheme:dark]"
                                                 value={settings.scheduler_start_time}
                                                 onChange={(e) => handleChange('scheduler_start_time', e.target.value)}
                                             />
@@ -364,7 +376,7 @@ export function Settings() {
                                             <label className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Pause Time</label>
                                             <input
                                                 type="time"
-                                                className="input-base text-sm py-2"
+                                                className="w-full bg-brand-tertiary border border-surface-border rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-white/20 transition-all [color-scheme:dark]"
                                                 value={settings.scheduler_pause_time}
                                                 onChange={(e) => handleChange('scheduler_pause_time', e.target.value)}
                                             />
@@ -384,15 +396,15 @@ export function Settings() {
                                 <p className="text-xs text-text-tertiary">Automatically detect and prompt for URLs in your clipboard.</p>
                             </div>
                             <button
-                                onClick={() => handleChange("autocatch_enabled", settings.autocatch_enabled === "true" ? "false" : "true")}
+                                onClick={() => handleChange("autocatch_enabled", !settings.autocatch_enabled)}
                                 className={clsx(
                                     "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.autocatch_enabled === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                    settings.autocatch_enabled ? 'bg-text-primary' : 'bg-brand-tertiary'
                                 )}
                             >
                                 <div className={clsx(
                                     "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.autocatch_enabled === "true" ? 'translate-x-7' : 'translate-x-1'
+                                    settings.autocatch_enabled ? 'translate-x-7' : 'translate-x-1'
                                 )} />
                             </button>
                         </div>
@@ -403,15 +415,15 @@ export function Settings() {
                                 <p className="text-xs text-text-tertiary">Obfuscate torrent traffic to bypass ISP throttling. <span className="text-status-warning opacity-80">(Requires Restart)</span></p>
                             </div>
                             <button
-                                onClick={() => handleChange("torrent_encryption", settings.torrent_encryption === "true" ? "false" : "true")}
+                                onClick={() => handleChange("torrent_encryption", !settings.torrent_encryption)}
                                 className={clsx(
                                     "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.torrent_encryption === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                    settings.torrent_encryption ? 'bg-text-primary' : 'bg-brand-tertiary'
                                 )}
                             >
                                 <div className={clsx(
                                     "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.torrent_encryption === "true" ? 'translate-x-7' : 'translate-x-1'
+                                    settings.torrent_encryption ? 'translate-x-7' : 'translate-x-1'
                                 )} />
                             </button>
                         </div>
