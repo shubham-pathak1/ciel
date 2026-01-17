@@ -95,6 +95,7 @@ pub struct Download {
     pub metadata: Option<String>,
     pub user_agent: Option<String>,
     pub cookies: Option<String>,
+    pub category: String,
 }
 
 /// Initialize the database with schema
@@ -121,14 +122,13 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             info_hash TEXT,
             metadata TEXT,
             user_agent TEXT,
-            cookies TEXT
+            cookies TEXT,
+            category TEXT NOT NULL DEFAULT 'Other'
         );
         "
     )?;
 
-    // Migrations
-    let _ = conn.execute("ALTER TABLE downloads ADD COLUMN user_agent TEXT ", []);
-    let _ = conn.execute("ALTER TABLE downloads ADD COLUMN cookies TEXT ", []);
+    // Migrations (old user_agent and cookies migrations are now part of initial table creation)
 
     conn.execute_batch(
         "
@@ -178,7 +178,13 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('open_folder_on_finish', 'false'),
             ('shutdown_on_finish', 'false'),
             ('sound_on_finish', 'true'),
-            ('theme', 'dark');
+            ('theme', 'dark'),
+            ('scheduler_enabled', 'false'),
+            ('scheduler_start_time', '02:00'),
+            ('scheduler_pause_time', '08:00'),
+            ('category_filter', 'All'),
+            ('max_retries', '5'),
+            ('retry_delay', '5');
         "
     )?;
 
@@ -205,6 +211,29 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
         }
     }
 
+    // Migration: Add category column to downloads table if it doesn't exist
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(downloads)")?;
+        let columns = stmt.query_map([], |row| {
+            let name: String = row.get(1)?;
+            Ok(name)
+        })?;
+
+        let mut has_category = false;
+        for col in columns {
+            if let Ok(name) = col {
+                if name == "category" {
+                    has_category = true;
+                    break;
+                }
+            }
+        }
+
+        if !has_category {
+            conn.execute("ALTER TABLE downloads ADD COLUMN category TEXT NOT NULL DEFAULT 'Other'", [])?;
+        }
+    }
+
     Ok(())
 }
 
@@ -212,8 +241,8 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
 pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies 
-         FROM downloads 
+        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category
+         FROM downloads
          ORDER BY created_at DESC "
     )?;
 
@@ -237,6 +266,7 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
                 metadata: row.get(14)?,
                 user_agent: row.get(15)?,
                 cookies: row.get(16)?,
+                category: row.get(17)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -248,8 +278,8 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
 pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies 
-         FROM downloads 
+        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category
+         FROM downloads
          WHERE status = 'completed'
          ORDER BY completed_at DESC "
     )?;
@@ -274,6 +304,7 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
                 metadata: row.get(14)?,
                 user_agent: row.get(15)?,
                 cookies: row.get(16)?,
+                category: row.get(17)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -285,8 +316,8 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
 pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> SqliteResult<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "INSERT INTO downloads (id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) ",
+        "INSERT INTO downloads (id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             &download.id,
             &download.url,
@@ -305,6 +336,7 @@ pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> Sqlit
             &download.metadata,
             &download.user_agent,
             &download.cookies,
+            &download.category,
         ],
     )?;
     Ok(())

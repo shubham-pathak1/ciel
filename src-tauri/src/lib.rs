@@ -8,8 +8,9 @@
 pub mod commands;
 pub mod db;
 pub mod downloader;
-pub mod torrent;
-pub mod video;
+mod torrent;
+mod video;
+mod scheduler;
 pub mod clipboard;
 pub mod tray;
 
@@ -73,7 +74,7 @@ pub fn run() {
 
             // Initialize Clipboard Monitor
             clipboard::start_clipboard_monitor(app.handle().clone());
-
+            scheduler::start_scheduler(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

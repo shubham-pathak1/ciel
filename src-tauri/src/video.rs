@@ -155,6 +155,7 @@ pub async fn add_video_download(
         metadata: Some(meta_json.to_string()),
         user_agent,
         cookies,
+        category: "Video".to_string(),
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;

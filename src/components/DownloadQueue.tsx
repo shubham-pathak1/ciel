@@ -22,7 +22,8 @@ interface TorrentInfo {
 }
 
 interface DownloadQueueProps {
-    filter: "downloads" | "active" | "completed" | "settings";
+    filter: "downloads" | "active" | "completed";
+    category?: string;
 }
 
 interface DownloadItem {
@@ -38,6 +39,10 @@ interface DownloadItem {
     status: "downloading" | "paused" | "completed" | "queued" | "error";
     filepath: string;
     status_text?: string;
+    metadata: string | null;
+    user_agent: string | null;
+    cookies: string | null;
+    category: string;
 }
 
 interface ProgressPayload {
@@ -72,7 +77,7 @@ const formatEta = (seconds: number) => {
     return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 };
 
-export function DownloadQueue({ filter }: DownloadQueueProps) {
+export function DownloadQueue({ filter, category }: DownloadQueueProps) {
     const [downloads, setDownloads] = useState<DownloadItem[]>([]);
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
     const [autocatchUrl, setAutocatchUrl] = useState("");
@@ -185,24 +190,24 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
     const filteredDownloads = downloads.filter((d) => {
         if (filter === "active") return d.status === "downloading" || d.status === "queued";
         if (filter === "completed") return d.status === "completed";
+        if (category && category !== "All") return d.category === category;
         return true;
     });
 
-    const titles: Record<string, string> = {
-        downloads: "All Downloads",
-        active: "Active Downloads",
-        completed: "History",
-        settings: "Settings"
-    };
-
     return (
-        <div className="h-full flex flex-col relative w-full max-w-5xl mx-auto">
-            {/* Header */}
-            <div className="flex items-center justify-between mb-8 sticky top-0 bg-brand-primary z-20 py-4 border-b border-transparent">
-                <div className="flex-col">
-                    <h1 className="text-2xl font-semibold text-text-primary tracking-tight">{titles[filter]}</h1>
-                    <p className="text-sm text-text-secondary mt-1">
-                        {filteredDownloads.length} {filteredDownloads.length === 1 ? 'Job' : 'Jobs'} in queue
+        <div className="flex flex-col h-full bg-brand-primary/50 relative overflow-hidden">
+            <div className="p-8 pb-4 flex items-center justify-between relative z-10">
+                <div className="flex flex-col gap-1">
+                    <h1 className="text-2xl font-bold text-text-primary tracking-tight flex items-center gap-2">
+                        {category ? `${category} Downloads` : filter === "active" ? "Active Downloads" : "All Downloads"}
+                        {filteredDownloads.length > 0 && (
+                            <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-brand-tertiary/20 text-brand-secondary">
+                                {filteredDownloads.length}
+                            </span>
+                        )}
+                    </h1>
+                    <p className="text-sm text-text-tertiary">
+                        {category ? `Organized collection of ${category.toLowerCase()} files` : "Manage and track your download tasks in real-time"}
                     </p>
                 </div>
 

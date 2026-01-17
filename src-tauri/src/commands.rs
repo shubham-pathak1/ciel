@@ -203,25 +203,39 @@ pub(crate) fn ensure_unique_path(path_str: String) -> String {
         return path_str;
     }
 
-    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
-    let extension = path.extension().and_then(|s| s.to_str());
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
 
     let mut counter = 1;
     loop {
-        let new_filename = match extension {
-            Some(ext) => format!("{} ({}).{}", file_stem, counter, ext),
-            None => format!("{} ({})", file_stem, counter),
+        let new_filename = if extension.is_empty() {
+            format!("{} ({})", stem, counter)
+        } else {
+            format!("{} ({}).{}", stem, counter, extension)
         };
-        let new_path = parent.join(&new_filename);
+        let new_path = parent.join(new_filename);
         if !new_path.exists() {
             return new_path.to_string_lossy().to_string();
         }
         counter += 1;
-        // Safety break to prevent infinite loops in degenerate cases
-        if counter > 10000 {
-             return path_str;
-        }
+    }
+}
+
+pub fn get_category_from_filename(filename: &str) -> String {
+    let path = Path::new(filename);
+    let extension = path.extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match extension.as_str() {
+        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" => "Video".to_string(),
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" => "Audio".to_string(),
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "iso" => "Compressed".to_string(),
+        "exe" | "msi" | "app" | "dmg" | "deb" | "rpm" => "Software".to_string(),
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "rtf" | "epub" => "Documents".to_string(),
+        _ => "Other".to_string(),
     }
 }
 
@@ -391,6 +405,7 @@ pub async fn add_download(
         metadata: None,
         user_agent,
         cookies,
+        category: get_category_from_filename(&filename),
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
@@ -453,6 +468,7 @@ pub async fn add_torrent(
         metadata: None,
         user_agent: None,
         cookies: None,
+        category: "Other".to_string(), // Torrents can be anything, default to other or analyze further?
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;

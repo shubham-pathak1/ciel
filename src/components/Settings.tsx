@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import logo from "../assets/logo.png";
-import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText, Zap } from "lucide-react";
+import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText, Zap, Clock } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -14,9 +14,12 @@ interface SettingsState {
     autocatch_enabled: string;
     speed_limit: string;
     torrent_encryption: string;
-    open_folder_on_finish: string;
-    shutdown_on_finish: string;
-    sound_on_finish: string;
+    open_folder_on_finish: boolean;
+    shutdown_on_finish: boolean;
+    sound_on_finish: boolean;
+    scheduler_enabled: boolean;
+    scheduler_start_time: string;
+    scheduler_pause_time: string;
 }
 
 export function Settings() {
@@ -29,9 +32,12 @@ export function Settings() {
         autocatch_enabled: "true",
         speed_limit: "0",
         torrent_encryption: "false",
-        open_folder_on_finish: "false",
-        shutdown_on_finish: "false",
-        sound_on_finish: "true",
+        open_folder_on_finish: false,
+        shutdown_on_finish: false,
+        sound_on_finish: true,
+        scheduler_enabled: false,
+        scheduler_start_time: "02:00",
+        scheduler_pause_time: "08:00",
     });
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
@@ -54,9 +60,12 @@ export function Settings() {
                 autocatch_enabled: result.autocatch_enabled || "true",
                 speed_limit: result.speed_limit || "0",
                 torrent_encryption: result.torrent_encryption || "false",
-                open_folder_on_finish: result.open_folder_on_finish || "false",
-                shutdown_on_finish: result.shutdown_on_finish || "false",
-                sound_on_finish: result.sound_on_finish || "true",
+                open_folder_on_finish: result.open_folder_on_finish === "true",
+                shutdown_on_finish: result.shutdown_on_finish === "true",
+                sound_on_finish: result.sound_on_finish === "true",
+                scheduler_enabled: result.scheduler_enabled === "true",
+                scheduler_start_time: result.scheduler_start_time || "02:00",
+                scheduler_pause_time: result.scheduler_pause_time || "08:00",
             });
 
             // Check for active downloads
@@ -72,7 +81,9 @@ export function Settings() {
         setIsSaving(true);
         try {
             for (const [key, value] of Object.entries(settings)) {
-                await invoke("update_setting", { key, value });
+                // Convert boolean values back to string for storage if necessary
+                const stringValue = typeof value === 'boolean' ? String(value) : value;
+                await invoke("update_setting", { key, value: stringValue });
             }
             setShowSuccess(true);
             setTimeout(() => setShowSuccess(false), 3000);
@@ -83,7 +94,7 @@ export function Settings() {
         }
     };
 
-    const handleChange = (key: keyof SettingsState, value: string) => {
+    const handleChange = (key: keyof SettingsState, value: string | boolean) => {
         setSettings(prev => ({ ...prev, [key]: value }));
     };
 
@@ -273,15 +284,15 @@ export function Settings() {
                                 <p className="text-xs text-text-tertiary">Automatically open the download folder and select the file when completed.</p>
                             </div>
                             <button
-                                onClick={() => handleChange("open_folder_on_finish", settings.open_folder_on_finish === "true" ? "false" : "true")}
+                                onClick={() => handleChange("open_folder_on_finish", !settings.open_folder_on_finish)}
                                 className={clsx(
                                     "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.open_folder_on_finish === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                    settings.open_folder_on_finish ? 'bg-text-primary' : 'bg-brand-tertiary'
                                 )}
                             >
                                 <div className={clsx(
                                     "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.open_folder_on_finish === "true" ? 'translate-x-7' : 'translate-x-1'
+                                    settings.open_folder_on_finish ? 'translate-x-7' : 'translate-x-1'
                                 )} />
                             </button>
                         </div>
@@ -292,15 +303,15 @@ export function Settings() {
                                 <p className="text-xs text-text-tertiary">Shutdown the PC automatically after all active downloads are finished.</p>
                             </div>
                             <button
-                                onClick={() => handleChange("shutdown_on_finish", settings.shutdown_on_finish === "true" ? "false" : "true")}
+                                onClick={() => handleChange("shutdown_on_finish", !settings.shutdown_on_finish)}
                                 className={clsx(
                                     "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.shutdown_on_finish === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                                    settings.shutdown_on_finish ? 'bg-text-primary' : 'bg-brand-tertiary'
                                 )}
                             >
                                 <div className={clsx(
                                     "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.shutdown_on_finish === "true" ? 'translate-x-7' : 'translate-x-1'
+                                    settings.shutdown_on_finish ? 'translate-x-7' : 'translate-x-1'
                                 )} />
                             </button>
                         </div>
@@ -310,18 +321,57 @@ export function Settings() {
                                 <h4 className="text-base font-medium text-text-primary mb-1">Sound Notifications</h4>
                                 <p className="text-xs text-text-tertiary">Play a subtle sound when a download task completes.</p>
                             </div>
-                            <button
-                                onClick={() => handleChange("sound_on_finish", settings.sound_on_finish === "true" ? "false" : "true")}
-                                className={clsx(
-                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.sound_on_finish === "true" ? 'bg-text-primary' : 'bg-brand-tertiary'
+                            <input
+                                type="checkbox"
+                                className="checkbox-custom"
+                                checked={settings.sound_on_finish}
+                                onChange={(e) => handleChange('sound_on_finish', e.target.checked)}
+                            />
+                        </div>
+
+                        <div className="pt-4 border-t border-brand-tertiary/20">
+                            <h3 className="text-sm font-medium text-text-primary flex items-center gap-2 mb-4">
+                                <Clock size={16} className="text-brand-secondary" />
+                                Download Scheduler
+                            </h3>
+
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <div className="flex flex-col gap-0.5">
+                                        <span className="text-sm font-medium text-text-primary tracking-tight">Enable Scheduler</span>
+                                        <span className="text-xs text-text-tertiary">Automatically manage downloads based on time</span>
+                                    </div>
+                                    <input
+                                        type="checkbox"
+                                        className="checkbox-custom"
+                                        checked={settings.scheduler_enabled}
+                                        onChange={(e) => handleChange('scheduler_enabled', e.target.checked)}
+                                    />
+                                </div>
+
+                                {settings.scheduler_enabled && (
+                                    <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                                        <div className="flex flex-col gap-2">
+                                            <label className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Start Time</label>
+                                            <input
+                                                type="time"
+                                                className="input-base text-sm py-2"
+                                                value={settings.scheduler_start_time}
+                                                onChange={(e) => handleChange('scheduler_start_time', e.target.value)}
+                                            />
+                                        </div>
+                                        <div className="flex flex-col gap-2">
+                                            <label className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Pause Time</label>
+                                            <input
+                                                type="time"
+                                                className="input-base text-sm py-2"
+                                                value={settings.scheduler_pause_time}
+                                                onChange={(e) => handleChange('scheduler_pause_time', e.target.value)}
+                                            />
+                                        </div>
+                                    </div>
                                 )}
-                            >
-                                <div className={clsx(
-                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.sound_on_finish === "true" ? 'translate-x-7' : 'translate-x-1'
-                                )} />
-                            </button>
+                            </div>
                         </div>
                     </div>
                 );

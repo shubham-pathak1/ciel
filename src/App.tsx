@@ -6,21 +6,26 @@ import { Settings } from "./components/Settings";
 import { History } from "./components/History";
 import { motion, AnimatePresence } from "framer-motion";
 
-type View = "downloads" | "active" | "completed" | "settings";
+type View = "downloads" | "active" | "completed" | "settings" | "Video" | "Audio" | "Compressed" | "Software" | "Documents" | "Other";
 
 function App() {
     const [currentView, setCurrentView] = useState<View>("downloads");
 
     const renderContent = () => {
+        if (["Video", "Audio", "Compressed", "Software", "Documents", "Other"].includes(currentView)) {
+            return <DownloadQueue filter="downloads" category={currentView} />;
+        }
+
         switch (currentView) {
             case "settings":
                 return <Settings />;
             case "completed":
                 return <History />;
-            case "downloads":
             case "active":
+                return <DownloadQueue filter="active" />;
+            case "downloads":
             default:
-                return <DownloadQueue filter={currentView} />;
+                return <DownloadQueue filter="downloads" />;
         }
     };
 
