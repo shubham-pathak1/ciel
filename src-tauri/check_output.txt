@@ -1,77 +1,45 @@
     Checking ciel v0.1.0 (D:\projects\ciel\src-tauri)
-error[E0433]: failed to resolve: use of unresolved module or unlinked crate `log`
-  --> src\scheduler.rs:41:17
-   |
-41 |                 log::info!("Scheduler: Pause time reached ({})", pause_time_str);
-   |                 ^^^ use of unresolved module or unlinked crate `log`
-
-error[E0433]: failed to resolve: use of unresolved module or unlinked crate `log`
-  --> src\scheduler.rs:36:17
-   |
-36 |                 log::info!("Scheduler: Start time reached ({})", start_time_str);
-   |                 ^^^ use of unresolved module or unlinked crate `log`
-
-warning: unused import: `State`
- --> src\scheduler.rs:2:33
-  |
-2 | use tauri::{AppHandle, Manager, State};
-  |                                 ^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused import: `DbState`
- --> src\scheduler.rs:3:23
-  |
-3 | use crate::db::{self, DbState};
-  |                       ^^^^^^^
-
-error[E0308]: mismatched types
-   --> src\video.rs:155:24
+warning: variable does not need to be mutable
+   --> src\video.rs:222:13
     |
-155 |         metadata: Some(meta_json),
-    |                   ---- ^^^^^^^^^ expected `String`, found `Value`
-    |                   |
-    |                   arguments to this enum variant are incorrect
+222 |         let mut cmd = bin_resolver::resolve_bin(&app_clone, Binary::YtDlp);
+    |             ----^^^
+    |             |
+    |             help: remove this `mut`
     |
-help: the type constructed contains `serde_json::Value` due to the type of the argument passed
-   --> src\video.rs:155:19
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0382]: use of moved value: `cmd`
+   --> src\video.rs:229:13
     |
-155 |         metadata: Some(meta_json),
-    |                   ^^^^^---------^
-    |                        |
-    |                        this argument influences the type of `Some`
-note: tuple variant defined here
-   --> /rustc/ed61e7d7e242494fb7057f2657300d9e77bb4fcb\library\core\src\option.rs:602:5
-help: try using a conversion method
+222 |         let mut cmd = bin_resolver::resolve_bin(&app_clone, Binary::YtDlp);
+    |             ------- move occurs because `cmd` has type `tauri_plugin_shell::process::Command`, which does not implement the `Copy` trait
+223 |         cmd.arg("-f")
+    |             --------- `cmd` moved due to this method call
+...
+229 |             cmd.arg("--ratelimit").arg(format!("{}", speed_limit));
+    |             ^^^ value used here after move
     |
-155 |         metadata: Some(meta_json.to_string()),
-    |                                 ++++++++++++
+note: `tauri_plugin_shell::process::Command::arg` takes ownership of the receiver `self`, which moves `cmd`
+   --> C:\Users\shubh\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-plugin-shell-2.3.3\src\process\mod.rs:174:37
+    |
+174 |     pub fn arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
+    |                                     ^^^^
 
-error[E0308]: mismatched types
-  --> src\scheduler.rs:57:35
-   |
-57 |             if download.status == "paused" || download.status == "queued" {
-   |                ---------------    ^^^^^^^^ expected `DownloadStatus`, found `&str`
-   |                |
-   |                expected because this is `DownloadStatus`
+error[E0382]: use of moved value: `cmd`
+   --> src\video.rs:232:35
+    |
+222 |         let mut cmd = bin_resolver::resolve_bin(&app_clone, Binary::YtDlp);
+    |             ------- move occurs because `cmd` has type `tauri_plugin_shell::process::Command`, which does not implement the `Copy` trait
+223 |         cmd.arg("-f")
+    |             --------- `cmd` moved due to this method call
+...
+229 |             cmd.arg("--ratelimit").arg(format!("{}", speed_limit));
+    |                 ------------------ `cmd` moved due to this method call
+...
+232 |         let (mut events, child) = cmd.arg("--concurrent-fragments")
+    |                                   ^^^ value used here after move
 
-error[E0308]: mismatched types
-  --> src\scheduler.rs:57:66
-   |
-57 |             if download.status == "paused" || download.status == "queued" {
-   |                                               ---------------    ^^^^^^^^ expected `DownloadStatus`, found `&str`
-   |                                               |
-   |                                               expected because this is `DownloadStatus`
-
-error[E0308]: mismatched types
-  --> src\scheduler.rs:77:35
-   |
-77 |             if download.status == "downloading" {
-   |                ---------------    ^^^^^^^^^^^^^ expected `DownloadStatus`, found `&str`
-   |                |
-   |                expected because this is `DownloadStatus`
-
-Some errors have detailed explanations: E0308, E0433.
-For more information about an error, try `rustc --explain E0308`.
-warning: `ciel` (lib) generated 2 warnings
-error: could not compile `ciel` (lib) due to 6 previous errors; 2 warnings emitted
+For more information about this error, try `rustc --explain E0382`.
+warning: `ciel` (lib) generated 1 warning
+error: could not compile `ciel` (lib) due to 2 previous errors; 1 warning emitted

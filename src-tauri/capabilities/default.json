@@ -14,6 +14,19 @@
         "core:window:allow-start-dragging",
         "shell:allow-open",
         "dialog:allow-confirm",
-        "dialog:allow-open"
+        "dialog:allow-open",
+        {
+            "identifier": "shell:allow-execute",
+            "allow": [
+                {
+                    "name": "binaries/yt-dlp",
+                    "sidecar": true
+                },
+                {
+                    "name": "binaries/ffmpeg",
+                    "sidecar": true
+                }
+            ]
+        }
     ]
 }

@@ -5,6 +5,7 @@
 //! - Download engine (HTTP multi-connection downloads)
 //! - Tauri commands for IPC
 
+pub mod bin_resolver;
 pub mod commands;
 pub mod db;
 pub mod downloader;

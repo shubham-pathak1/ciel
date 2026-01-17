@@ -1,9 +1,9 @@
 use crate::db::{self, DbState, Download, DownloadStatus, DownloadProtocol};
 use crate::commands::{DownloadManager, resolve_download_path, ensure_unique_path, execute_post_download_actions};
+use crate::bin_resolver::{self, Binary};
 use serde::{Deserialize, Serialize};
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_shell::process::CommandEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoMetadata {
@@ -27,8 +27,8 @@ pub struct VideoFormat {
 }
 
 #[tauri::command]
-pub async fn analyze_video_url(url: String) -> Result<VideoMetadata, String> {
-    let output = tokio::process::Command::new("yt-dlp")
+pub async fn analyze_video_url(app: AppHandle, url: String) -> Result<VideoMetadata, String> {
+    let output = bin_resolver::resolve_bin(&app, Binary::YtDlp)
         .arg("--dump-json")
         .arg("--no-playlist")
         .arg("--flat-playlist")
@@ -219,17 +219,17 @@ pub async fn start_video_download_task(
         .unwrap_or(0);
 
     tokio::spawn(async move {
-        let mut cmd = tokio::process::Command::new("yt-dlp");
-        cmd.arg("-f")
+        let mut cmd = bin_resolver::resolve_bin(&app_clone, Binary::YtDlp);
+        cmd = cmd.arg("-f")
             .arg(&format_selector)
             .arg("--merge-output-format")
             .arg("mp4");
-        
+
         if speed_limit > 0 {
-            cmd.arg("--ratelimit").arg(format!("{}", speed_limit));
+            cmd = cmd.arg("--ratelimit").arg(format!("{}", speed_limit));
         }
 
-        let mut child = cmd.arg("--concurrent-fragments")
+        let (mut events, child) = cmd.arg("--concurrent-fragments")
             .arg(max_connections.to_string())
             .arg("--no-mtime")
             .arg("--no-check-certificates")
@@ -240,13 +240,8 @@ pub async fn start_video_download_task(
             .arg("-o")
             .arg(&final_path)
             .arg(&url)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .expect("Failed to start yt-dlp");
-
-        let stdout = child.stdout.take().unwrap();
-        let mut reader = BufReader::new(stdout).lines();
 
         // Initial total from metadata if available
         let expected_total_size = if let Some(ref meta_str) = download.metadata {
@@ -263,143 +258,129 @@ pub async fn start_video_download_task(
         // let mut current_destination = String::new();
         let mut status_text: Option<String> = Some("Starting...".to_string());
 
-        loop {
-            tokio::select! {
-                line_res = reader.next_line() => {
-                    match line_res {
-                        Ok(Some(line)) => {
-                            // Detect status/phase changes
-                            if line.starts_with("[youtube]") {
-                                status_text = Some("Extracting info...".to_string());
-                            } else if line.starts_with("[Merger]") {
-                                status_text = Some("Assembling...".to_string());
-                            } else if line.starts_with("[ExtractAudio]") {
-                                status_text = Some("Extracting Audio...".to_string());
-                            } else if line.starts_with("[ffmpeg]") {
-                                status_text = Some("Processing...".to_string());
+        while let Some(event) = events.recv().await {
+            match event {
+                CommandEvent::Stdout(line_bytes) => {
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    // Detect status/phase changes
+                    if line.starts_with("[youtube]") {
+                        status_text = Some("Extracting info...".to_string());
+                    } else if line.starts_with("[Merger]") {
+                        status_text = Some("Assembling...".to_string());
+                    } else if line.starts_with("[ExtractAudio]") {
+                        status_text = Some("Extracting Audio...".to_string());
+                    } else if line.starts_with("[ffmpeg]") {
+                        status_text = Some("Processing...".to_string());
+                    }
+
+                    // Detect new file start
+                    if line.contains("[download] Destination:") {
+                        if current_file_max_size > 0 {
+                            accumulated_completed_bytes += current_file_max_size;
+                            current_file_max_size = 0;
+                        }
+                        status_text = None;
+                    }
+
+                    if line.contains("[download]") && line.contains("%") {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        let mut progress_pct = 0.0;
+                        let mut total_size_bytes = 0;
+                        let mut speed_bytes = 0;
+                        let mut eta_secs = 0;
+
+                        for (i, part) in parts.iter().enumerate() {
+                            if part.contains('%') {
+                                progress_pct = part.replace("%", "").parse::<f64>().unwrap_or(0.0);
                             }
-
-                            // Detect new file start
-                            if line.contains("[download] Destination:") {
-                                // If we were tracking a previous file, assume it finished successfully
-                                // and add its max size to accumulated. 
-                                // (Unless it's the very first line).
-                                if current_file_max_size > 0 {
-                                    accumulated_completed_bytes += current_file_max_size;
-                                    current_file_max_size = 0;
-                                }
-                                status_text = None; // Clear status text when downloading starts
-                                
-                                // Reset for new file
-                                // current_destination = line.clone();
+                            if *part == "of" && i + 1 < parts.len() {
+                                total_size_bytes = parse_size(parts[i+1]);
                             }
-                            // Detect "already downloaded"
-                            else if line.contains("has already been downloaded") {
-                                // Try to parse size? Usually it says "100% of X MiB"
+                            if *part == "at" && i + 1 < parts.len() {
+                                speed_bytes = parse_size(parts[i+1].replace("/s", "").as_str());
                             }
-
-                            if line.contains("[download]") && line.contains("%") {
-                                let parts: Vec<&str> = line.split_whitespace().collect();
-                                let mut progress_pct = 0.0;
-                                let mut total_size_bytes = 0;
-                                let mut speed_bytes = 0;
-                                let mut eta_secs = 0;
-
-                                for (i, part) in parts.iter().enumerate() {
-                                    if part.contains('%') {
-                                        progress_pct = part.replace("%", "").parse::<f64>().unwrap_or(0.0);
-                                    }
-                                    if *part == "of" && i + 1 < parts.len() {
-                                        total_size_bytes = parse_size(parts[i+1]);
-                                    }
-                                    if *part == "at" && i + 1 < parts.len() {
-                                        speed_bytes = parse_size(parts[i+1].replace("/s", "").as_str());
-                                    }
-                                    if *part == "ETA" && i + 1 < parts.len() {
-                                        eta_secs = parse_eta(parts[i+1]);
-                                    }
-                                }
-
-                                if total_size_bytes > current_file_max_size {
-                                    current_file_max_size = total_size_bytes;
-                                }
-
-                                // Calculate reliable totals
-                                let current_part_downloaded = (progress_pct / 100.0 * current_file_max_size as f64) as u64;
-                                let total_downloaded_so_far = accumulated_completed_bytes + current_part_downloaded;
-                                
-                                // Dynamic Total: Whichever is larger (Expected vs Actual Running Sum)
-                                let running_total = accumulated_completed_bytes + current_file_max_size;
-                                let display_total = if expected_total_size > running_total { expected_total_size } else { running_total };
-
-                                // Create "unified" view for the UI.
-                                // If expected_total is accurate, this will smoothly go from 0 to 100%.
-                                
-                                let _ = app_clone.emit("download-progress", serde_json::json!({
-                                    "id": id_clone,
-                                    "total": display_total,
-                                    "downloaded": total_downloaded_so_far,
-                                    "speed": speed_bytes,
-                                    "eta": eta_secs,
-                                    "connections": max_connections,
-                                    "status_text": status_text,
-                                }));
-
-                                let _ = db::update_download_progress(&db_path_clone, &id_clone, total_downloaded_so_far as i64, speed_bytes as i64);
-                                if display_total > 0 {
-                                    let _ = db::update_download_size(&db_path_clone, &id_clone, display_total as i64);
-                                }
-                            }
-                            // If it's a status line but not download progress, we should emit an update too
-                            else if status_text.is_some() && !line.contains("[download]") {
-                                 let _ = app_clone.emit("download-progress", serde_json::json!({
-                                    "id": id_clone,
-                                    "total": if expected_total_size > 0 { expected_total_size } else { 0 },
-                                    "downloaded": accumulated_completed_bytes, // Show what's done so far
-                                    "speed": 0,
-                                    "eta": 0,
-                                    "connections": 0,
-                                    "status_text": status_text,
-                                }));
+                            if *part == "ETA" && i + 1 < parts.len() {
+                                eta_secs = parse_eta(parts[i+1]);
                             }
                         }
-                        Ok(None) => break,
-                        Err(_) => break,
+
+                        if total_size_bytes > current_file_max_size {
+                            current_file_max_size = total_size_bytes;
+                        }
+
+                        let current_part_downloaded = (progress_pct / 100.0 * current_file_max_size as f64) as u64;
+                        let total_downloaded_so_far = accumulated_completed_bytes + current_part_downloaded;
+                        let running_total = accumulated_completed_bytes + current_file_max_size;
+                        let display_total = if expected_total_size > running_total { expected_total_size } else { running_total };
+
+                        let _ = app_clone.emit("download-progress", serde_json::json!({
+                            "id": id_clone,
+                            "total": display_total,
+                            "downloaded": total_downloaded_so_far,
+                            "speed": speed_bytes,
+                            "eta": eta_secs,
+                            "connections": max_connections,
+                            "status_text": status_text,
+                        }));
+
+                        let _ = db::update_download_progress(&db_path_clone, &id_clone, total_downloaded_so_far as i64, speed_bytes as i64);
+                        if display_total > 0 {
+                            let _ = db::update_download_size(&db_path_clone, &id_clone, display_total as i64);
+                        }
+                    } else if status_text.is_some() && !line.contains("[download]") {
+                         let _ = app_clone.emit("download-progress", serde_json::json!({
+                            "id": id_clone,
+                            "total": if expected_total_size > 0 { expected_total_size } else { 0 },
+                            "downloaded": accumulated_completed_bytes,
+                            "speed": 0,
+                            "eta": 0,
+                            "connections": 0,
+                            "status_text": status_text,
+                        }));
                     }
                 }
-                _ = rx.recv() => {
-                    let _ = child.kill().await;
-                    aborted = true;
-                    let _ = db::update_download_status(&db_path_clone, &id_clone, DownloadStatus::Paused);
-                    let _ = app_clone.emit("download-paused", id_clone.clone());
+                CommandEvent::Stderr(line_bytes) => {
+                    let _line = String::from_utf8_lossy(&line_bytes);
+                }
+                CommandEvent::Terminated(payload) => {
+                    if !payload.code.map_or(false, |code| code == 0) {
+                         // We'll handle overall failure after the loop
+                    }
                     break;
                 }
+                _ => {}
+            }
+
+            // Check for termination signal
+            if rx.try_recv().is_ok() {
+                let _ = child.kill();
+                aborted = true;
+                let _ = db::update_download_status(&db_path_clone, &id_clone, DownloadStatus::Paused);
+                let _ = app_clone.emit("download-paused", id_clone.clone());
+                break;
             }
         }
 
         if !aborted {
-            let status = child.wait().await;
-            if status.map_or(false, |s| s.success()) {
-                // Wait briefly for OS to finalize file handle
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // The loop finishes when CommandEvent::Terminated is received
+            // or when the stream ends.
+            
+            // Wait briefly for OS to finalize file handle
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-                // Update final size from disk
-                if let Ok(meta) = std::fs::metadata(&final_path) {
-                    let final_size = meta.len() as i64;
-                    let _ = db::update_download_size(&db_path_clone, &id_clone, final_size);
-                    let _ = db::update_download_progress(&db_path_clone, &id_clone, final_size, 0);
-                }
-                
-                let _ = db::update_download_status(&db_path_clone, &id_clone, DownloadStatus::Completed);
-                let _ = app_clone.emit("download-completed", id_clone.clone());
-
-                // Post-Download Actions
-                let download_clone = download.clone();
-                execute_post_download_actions(app_clone.clone(), db_path_clone.clone(), download_clone).await;
-            } else {
-                let _ = db::update_download_status(&db_path_clone, &id_clone, DownloadStatus::Error);
-                let _ = app_clone.emit("download-error", (id_clone.clone(), "yt-dlp failed"));
+            // Update final size from disk
+            if let Ok(meta) = std::fs::metadata(&final_path) {
+                let final_size = meta.len() as i64;
+                let _ = db::update_download_size(&db_path_clone, &id_clone, final_size);
+                let _ = db::update_download_progress(&db_path_clone, &id_clone, final_size, 0);
             }
+            
+            let _ = db::update_download_status(&db_path_clone, &id_clone, DownloadStatus::Completed);
+            let _ = app_clone.emit("download-completed", id_clone.clone());
+
+            // Post-Download Actions
+            let download_clone = download.clone();
+            execute_post_download_actions(app_clone.clone(), db_path_clone.clone(), download_clone).await;
         }
 
         manager_clone.remove_active(&id_clone).await;
