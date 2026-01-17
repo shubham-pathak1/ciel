@@ -1,6 +1,6 @@
 # Ciel
 
-Ciel is a high-performance, open-source download manager for Windows built with **Tauri** and **Rust**. It aims to provide a clean, bloat-free experience focused on core efficiency and ease of use.
+Ciel is a high-performance, open-source download manager for Windows built with **Tauri** and **Rust**. I've designed it to provide a clean, bloat-free experience focused on core efficiency and ease of use.
 
 ## Core Features
 - **Parallel Downloading**: Optimized multi-threaded HTTP engine with segment-based chunk management.
@@ -22,7 +22,7 @@ Ciel is a high-performance, open-source download manager for Windows built with 
 
 ## Development Setup
 
-We welcome contributions! To get started with the development environment:
+I welcome contributions! As a solo developer, I'm always looking for extra hands to help polish features or fix bugs. To get started with the development environment:
 
 ```bash
 # 1. Install dependencies
@@ -41,7 +41,7 @@ Rust target directories can be quite large. You can customize your build path:
 2. Update the `target-dir` key to your preferred location.
 
 ## Contributing
-Ciel is an open-source project. If you find a bug or have a suggestion, please feel free to open an issue or submit a pull request. We appreciate any help in making Ciel better for everyone.
+Ciel is an open-source project. If you find a bug or have a suggestion, please feel free to open an issue or submit a pull request. As I'm maintaining this project on my own, I truly appreciate any help in making Ciel better for everyone.
 
 ## License
 MIT

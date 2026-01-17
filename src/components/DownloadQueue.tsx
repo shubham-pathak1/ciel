@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 import clsx from "clsx";
+import { open } from "@tauri-apps/plugin-dialog";
 import { ModalPortal } from "./ModalPortal";
 import { TorrentFileSelector } from "./TorrentFileSelector";
 import { VideoPreview } from "./VideoPreview";
@@ -347,9 +348,11 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadI
                                 {download.filename}
                             </h3>
                             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button onClick={handlePauseResume} className="btn-ghost p-1.5">
-                                    {download.status === "downloading" ? <Pause size={14} /> : <Play size={14} />}
-                                </button>
+                                {download.status !== "completed" && (
+                                    <button onClick={handlePauseResume} className="btn-ghost p-1.5">
+                                        {download.status === "downloading" ? <Pause size={14} /> : <Play size={14} />}
+                                    </button>
+                                )}
                                 <button onClick={() => invoke("show_in_folder", { path: download.filepath })} className="btn-ghost p-1.5">
                                     <FolderOpen size={14} />
                                 </button>
@@ -454,6 +457,23 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         checkClipboard();
     }, [initialUrl]);
 
+    const getSaveLocation = async () => {
+        try {
+            const settings = await invoke<Record<string, string>>("get_settings");
+            if (settings.ask_location === "true") {
+                const selected = await open({
+                    directory: true,
+                    multiple: false,
+                    defaultPath: settings.download_path || undefined,
+                });
+                return selected as string | null;
+            }
+        } catch (e) {
+            console.error("Failed to check ask_location setting:", e);
+        }
+        return undefined;
+    };
+
     const handleAdd = async () => {
         if (!url) return;
         try { new URL(url); } catch (e) { setStatus("Error: Invalid URL"); return; }
@@ -478,10 +498,17 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                 setTorrentInfo(info);
                 setStatus(null);
             } else {
+                const output_folder = await getSaveLocation();
+                if (output_folder === null) {
+                    setIsAdding(false);
+                    return; // User cancelled
+                }
+
                 await invoke("add_download", {
                     url,
                     filename: typeInfo.hinted_filename || "download",
                     filepath: "",
+                    outputFolder: output_folder || null,
                     userAgent: userAgent || null,
                     cookies: cookies || null
                 });
@@ -498,8 +525,13 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     const handleVideoDownload = async (formatId: string, ext: string, audioId?: string, totalSize?: number) => {
         setIsAdding(true);
         try {
+            const output_folder = await getSaveLocation();
+            if (output_folder === null) {
+                setIsAdding(false);
+                return;
+            }
             const filename = `${videoMetadata.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
-            await invoke("add_video_download", { url, formatId, audioId, totalSize, filepath: filename });
+            await invoke("add_video_download", { url, formatId, audioId, totalSize, filepath: filename, outputFolder: output_folder || null });
             onAdded();
             onClose();
         } catch (err) {
@@ -512,7 +544,12 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     const handleTorrentSelect = async (indices: number[]) => {
         setIsAdding(true);
         try {
-            await invoke("add_torrent", { url, filename: torrentInfo?.name || "Torrent", filepath: "", indices });
+            const output_folder = await getSaveLocation();
+            if (output_folder === null) {
+                setIsAdding(false);
+                return;
+            }
+            await invoke("add_torrent", { url, filename: torrentInfo?.name || "Torrent", filepath: "", indices, outputFolder: output_folder || null });
             onAdded();
             onClose();
         } catch (err) {

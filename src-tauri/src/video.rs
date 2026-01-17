@@ -102,6 +102,7 @@ pub async fn add_video_download(
     audio_id: Option<String>,
     total_size: Option<u64>,
     filepath: String,
+    output_folder: Option<String>,
     user_agent: Option<String>,
     cookies: Option<String>,
 ) -> Result<(), String> {
@@ -121,7 +122,7 @@ pub async fn add_video_download(
         }
     }
 
-    let resolved_path = resolve_download_path(&app, &db_state.path, &adjusted_filepath, None);
+    let resolved_path = resolve_download_path(&app, &db_state.path, &adjusted_filepath, output_folder);
     let final_path = ensure_unique_path(resolved_path);
 
     // Extract the final unique filename from the path

@@ -184,7 +184,8 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('scheduler_pause_time', '08:00'),
             ('category_filter', 'All'),
             ('max_retries', '5'),
-            ('retry_delay', '5');
+            ('retry_delay', '5'),
+            ('ask_location', 'false');
         "
     )?;
 
