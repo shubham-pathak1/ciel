@@ -8,18 +8,24 @@ pub fn start_clipboard_monitor(app: AppHandle) {
         let mut clipboard = Clipboard::new().ok();
         let mut last_clipboard = String::new();
 
+        let mut last_settings_check = std::time::Instant::now() - Duration::from_secs(10);
+        let mut cached_enabled = true;
+
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
 
-            // Check if autocatch is enabled
-            let db_state = app.state::<db::DbState>();
-            let enabled = db::get_setting(&db_state.path, "autocatch_enabled")
-                .ok()
-                .flatten()
-                .map(|v| v == "true")
-                .unwrap_or(true);
+            // Check if autocatch is enabled (cached for 5s to reduce DB polling)
+            if last_settings_check.elapsed() > Duration::from_secs(5) {
+                let db_state = app.state::<db::DbState>();
+                let settings = db::get_all_settings(&db_state.path).unwrap_or_default();
+                cached_enabled = settings.get("autocatch_enabled")
+                    .map(|v| v == "true")
+                    .unwrap_or(true);
+                last_settings_check = std::time::Instant::now();
+            }
 
-            if !enabled {
+            if !cached_enabled {
+                last_clipboard.clear(); // Clear so it catches fresh if re-enabled
                 continue;
             }
 

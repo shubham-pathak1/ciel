@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, memo } from "react";
 import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Video as VideoIcon, Database as DatabaseIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -77,7 +77,7 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
     const [autocatchUrl, setAutocatchUrl] = useState("");
 
-    const handleRefreshList = async () => {
+    const handleRefreshList = useCallback(async () => {
         try {
             const [downloads, settings] = await Promise.all([
                 invoke<DownloadItem[]>("get_downloads"),
@@ -96,7 +96,7 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
         } catch (err) {
             console.error("Failed to fetch downloads:", err);
         }
-    };
+    }, []);
 
     const playSuccessSound = () => {
         try {
@@ -162,9 +162,15 @@ export function DownloadQueue({ filter }: DownloadQueueProps) {
             setDownloads((prev) => prev.map(d => d.id === event.payload.id ? { ...d, filename: event.payload.filename } : d));
         });
 
-        const unlistenAutocatch = listen<string>("autocatch-url", (event) => {
-            // Store the detected URL globally but don't show a toast
-            setAutocatchUrl(event.payload);
+        const unlistenAutocatch = listen<string>("autocatch-url", async (event) => {
+            try {
+                const settings = await invoke<Record<string, string>>("get_settings");
+                if (settings.autocatch_enabled === "true") {
+                    setAutocatchUrl(event.payload);
+                }
+            } catch (err) {
+                console.error("Failed to check autocatch setting:", err);
+            }
         });
 
         return () => {
@@ -272,7 +278,7 @@ function EmptyState({ filter, onAdd }: { filter: string, onAdd: () => void }) {
     );
 }
 
-const DownloadCard = React.forwardRef<HTMLDivElement, { download: DownloadItem, onRefresh: () => void }>(
+const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadItem, onRefresh: () => void }>(
     ({ download, onRefresh }, ref) => {
         const progress = download.size > 0 ? (download.downloaded / download.size) * 100 : 0;
         const [visualProgress, setVisualProgress] = useState(progress);
@@ -405,7 +411,7 @@ const DownloadCard = React.forwardRef<HTMLDivElement, { download: DownloadItem, 
             </motion.div>
         );
     }
-);
+));
 
 function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () => void, onAdded: () => void, initialUrl?: string }) {
     const [url, setUrl] = useState(initialUrl);
@@ -428,9 +434,12 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
             // Priority 2: Direct clipboard check on mount if field is empty
             if (!url) {
                 try {
-                    const clipText = await invoke<string | null>("get_clipboard");
-                    if (clipText) {
-                        setUrl(clipText);
+                    const settings = await invoke<Record<string, string>>("get_settings");
+                    if (settings.autocatch_enabled === "true") {
+                        const clipText = await invoke<string | null>("get_clipboard");
+                        if (clipText) {
+                            setUrl(clipText);
+                        }
                     }
                 } catch (e) {
                     // Silent failure
