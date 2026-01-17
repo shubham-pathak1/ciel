@@ -16,9 +16,13 @@ Ciel is a high-performance, open-source download manager for Windows built with 
 - **Automation**: Automatic folder reveal upon completion, system shutdown options, and sound notifications.
 - **Privacy Focus**: Completely offline-first. No tracking, no telemetry, no accounts. All data stays local.
 
-## Technical Requirements
-- **yt-dlp**: Required for video download support.
-- **FFmpeg**: Required for high-quality video muxing and audio extraction.
+## Internal Engines
+To ensure Ciel "just works" out of the box, I have bundled `yt-dlp` and `ffmpeg` directly as Rust sidecars.
+- **yt-dlp**: Handles high-speed metadata extraction and video stream downloads.
+- **FFmpeg**: Handles transparent merging of 4K/8K video and audio tracks.
+
+> [!NOTE]
+> Bundling these allows for a seamless, technical-free experience. However, if you prefer a "Lite" version of Ciel without these internal binaries (which requires you to install them manually on your system), please let me know—I can provide a separate build!
 
 ## Development Setup
 
