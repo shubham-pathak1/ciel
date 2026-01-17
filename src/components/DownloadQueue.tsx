@@ -104,30 +104,6 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
         }
     }, []);
 
-    const playSuccessSound = () => {
-        try {
-            const context = new (window.AudioContext || (window as any).webkitAudioContext)();
-            const oscillator = context.createOscillator();
-            const gain = context.createGain();
-
-            oscillator.type = 'sine';
-            oscillator.frequency.setValueAtTime(587.33, context.currentTime); // D5
-            oscillator.frequency.exponentialRampToValueAtTime(880.00, context.currentTime + 0.1); // A5
-
-            gain.gain.setValueAtTime(0, context.currentTime);
-            gain.gain.linearRampToValueAtTime(0.2, context.currentTime + 0.05);
-            gain.gain.exponentialRampToValueAtTime(0.01, context.currentTime + 0.4);
-
-            oscillator.connect(gain);
-            gain.connect(context.destination);
-
-            oscillator.start(context.currentTime);
-            oscillator.stop(context.currentTime + 0.4);
-        } catch (e) {
-            console.error("Failed to play sound:", e);
-        }
-    };
-
     useEffect(() => {
         handleRefreshList();
 
@@ -154,14 +130,6 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
 
         const unlistenCompleted = listen<string>("download-completed", async () => {
             handleRefreshList();
-            try {
-                const settings = await invoke<Record<string, string>>("get_settings");
-                if (settings.sound_on_finish === "true") {
-                    playSuccessSound();
-                }
-            } catch (err) {
-                console.error("Failed to check sound setting:", err);
-            }
         });
 
         const unlistenName = listen<{ id: string; filename: string }>("download-name-updated", (event) => {
@@ -489,7 +457,12 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                     setVideoMetadata(metadata);
                     setStatus(null);
                     return;
-                } catch (e) { console.warn("Video analysis failed", e); }
+                } catch (e) {
+                    console.warn("Video analysis failed", e);
+                    setStatus(`Video Analysis Failed: ${e}`);
+                    setIsAdding(false);
+                    return; // Stop here if it was meant to be a video
+                }
             }
 
             const typeInfo = await invoke<any>("validate_url_type", { url });

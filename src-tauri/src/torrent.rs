@@ -21,37 +21,44 @@ pub struct TorrentInfo {
 }
 
 pub struct TorrentManager {
-    session: Arc<Session>,
+    session: Option<Arc<Session>>,
     active_torrents: Arc<Mutex<HashMap<String, Arc<ManagedTorrent>>>>, // Maps Ciel ID to librqbit handle
 }
 
 impl TorrentManager {
-    pub async fn new(_force_encryption: bool) -> Self {
-        // Default download folder for the session (we can override per torrent if library allows)
+    pub async fn new(_force_encryption: bool) -> Result<Self, String> {
         let download_dir = PathBuf::from("./downloads");
         if !download_dir.exists() {
             std::fs::create_dir_all(&download_dir).ok();
         }
         
         let options = librqbit::SessionOptions::default();
-        // Encryption is likely enabled by default in recent librqbit versions, 
-        // or requires a different approach. Removing for now to fix build.
         
-        let session = Session::new_with_opts(download_dir, options).await.expect("Failed to create librqbit session");
-        Self {
-            session: session,
-            active_torrents: Arc::new(Mutex::new(HashMap::new())),
+        match Session::new_with_opts(download_dir, options).await {
+            Ok(session) => Ok(Self {
+                session: Some(session),
+                active_torrents: Arc::new(Mutex::new(HashMap::new())),
+            }),
+            Err(e) => {
+                eprintln!("Failed to start torrent session: {}. Torrents will be disabled.", e);
+                Ok(Self {
+                    session: None,
+                    active_torrents: Arc::new(Mutex::new(HashMap::new())),
+                })
+            }
         }
     }
 
     pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>) -> Result<(), String> {
+        let session = self.session.as_ref().ok_or("Torrent session is not active (port conflict or initialization error)")?;
+        
         let options = librqbit::AddTorrentOptions {
             only_files: indices,
             output_folder: Some(output_folder.clone()),
             overwrite: true,
             ..Default::default()
         };
-        let response = self.session.add_torrent(AddTorrent::from_url(magnet), Some(options)).await
+        let response = session.add_torrent(AddTorrent::from_url(magnet), Some(options)).await
             .map_err(|e| e.to_string())?;
         
         let handle = response.into_handle().ok_or("Failed to get torrent handle")?;
@@ -162,6 +169,8 @@ impl TorrentManager {
     }
 
     pub async fn analyze_magnet(&self, magnet: String) -> Result<TorrentInfo, String> {
+        let session = self.session.as_ref().ok_or("Torrent session is not active (port conflict or initialization error)")?;
+
         let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
         let options = librqbit::AddTorrentOptions {
             output_folder: Some(temp_dir),
@@ -169,7 +178,7 @@ impl TorrentManager {
             overwrite: true,
             ..Default::default()
         };
-        let response = self.session.add_torrent(librqbit::AddTorrent::from_url(magnet), Some(options)).await
+        let response = session.add_torrent(librqbit::AddTorrent::from_url(magnet), Some(options)).await
             .map_err(|e| e.to_string())?;
         
         let handle = response.into_handle().ok_or("Failed to get torrent handle")?;
@@ -200,7 +209,7 @@ impl TorrentManager {
                     // Remove from session so it can be re-added with selective files later
                     // Use the infohash from the handle
                     let info_hash = handle.info_hash();
-                    self.session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
+                    session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
                         .map_err(|e| e.to_string())?;
                     return Ok(info);
                 },
@@ -216,28 +225,32 @@ impl TorrentManager {
     }
 
     pub async fn start_selective(&self, id: &str, _indices: Vec<usize>) -> Result<(), String> {
+        let session = self.session.as_ref().ok_or("Torrent session is not active")?;
+        
         // Since we removed it during analysis, this might not be in active_torrents yet
         // Wait, start_selective is called AFTER add_torrent in the new flow?
         // Let's check commands.rs
         let active = self.active_torrents.lock().await;
         if let Some(handle) = active.get(id) {
-             self.session.unpause(handle).await.map_err(|e| e.to_string())?;
+             session.unpause(handle).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
     pub async fn pause_torrent(&self, id: &str) -> Result<(), String> {
+        let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         let active = self.active_torrents.lock().await;
         if let Some(handle) = active.get(id) {
-            self.session.pause(handle).await.map_err(|e| e.to_string())?;
+            session.pause(handle).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
     pub async fn resume_torrent(&self, id: &str) -> Result<(), String> {
+        let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         let active = self.active_torrents.lock().await;
         if let Some(handle) = active.get(id) {
-            self.session.unpause(handle).await.map_err(|e| e.to_string())?;
+            session.unpause(handle).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }

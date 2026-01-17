@@ -50,8 +50,8 @@
             }
         },
         "externalBin": [
-            "binaries/yt-dlp",
-            "binaries/ffmpeg"
+            "yt-dlp",
+            "ffmpeg"
         ]
     },
     "plugins": {

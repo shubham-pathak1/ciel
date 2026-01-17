@@ -56,7 +56,8 @@ pub fn run() {
                 .unwrap_or(false);
 
             // Initialize and manage TorrentManager
-            let torrent_manager = tauri::async_runtime::block_on(torrent::TorrentManager::new(force_encryption));
+            let torrent_manager = tauri::async_runtime::block_on(torrent::TorrentManager::new(force_encryption))
+                .expect("Failed to initialize TorrentManager struct");
             app.manage(torrent_manager);
 
             // Apply window effects (vibrancy/acrylic on supported platforms)

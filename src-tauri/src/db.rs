@@ -177,7 +177,7 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('torrent_encryption', 'false'),
             ('open_folder_on_finish', 'false'),
             ('shutdown_on_finish', 'false'),
-            ('sound_on_finish', 'true'),
+            ('sound_on_finish', 'false'),
             ('theme', 'dark'),
             ('scheduler_enabled', 'false'),
             ('scheduler_start_time', '02:00'),

@@ -11,8 +11,8 @@ pub enum Binary {
 impl Binary {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::YtDlp => "binaries/yt-dlp",
-            Self::Ffmpeg => "binaries/ffmpeg",
+            Self::YtDlp => "yt-dlp",
+            Self::Ffmpeg => "ffmpeg",
         }
     }
 

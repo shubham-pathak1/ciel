@@ -19,11 +19,11 @@
             "identifier": "shell:allow-execute",
             "allow": [
                 {
-                    "name": "binaries/yt-dlp",
+                    "name": "yt-dlp",
                     "sidecar": true
                 },
                 {
-                    "name": "binaries/ffmpeg",
+                    "name": "ffmpeg",
                     "sidecar": true
                 }
             ]
