@@ -431,9 +431,9 @@ export function Settings() {
                 );
             case "about":
                 return (
-                    <div className="space-y-8 text-center py-8 animate-fade-in">
-                        <div className="relative w-32 h-32 mx-auto">
-                            <div className="relative w-full h-full flex items-center justify-center p-4">
+                    <div className="space-y-6 text-center py-4 animate-fade-in">
+                        <div className="relative w-24 h-24 mx-auto">
+                            <div className="relative w-full h-full flex items-center justify-center p-2">
                                 <img
                                     src={logo}
                                     alt="Ciel Logo"
@@ -443,35 +443,33 @@ export function Settings() {
                         </div>
 
                         <div>
-                            <h2 className="text-2xl font-bold text-text-primary mb-2 tracking-tight">Ciel Download Manager</h2>
-                            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-tertiary text-text-secondary text-xs font-mono font-medium">
-                                v0.1.0 Beta
+                            <h2 className="text-2xl font-bold text-text-primary mb-1 tracking-tight">Ciel Download Manager</h2>
+                            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-tertiary text-text-secondary text-[10px] font-mono font-medium lowercase">
+                                v0.1.0-alpha
                             </div>
                         </div>
 
-                        <div className="max-w-md mx-auto p-6 bg-brand-secondary rounded-xl border border-surface-border">
-                            <p className="text-sm text-text-secondary italic leading-relaxed">
-                                "Built for speed, designed for elegance. Ciel redefines what a download manager can be."
-                            </p>
-                        </div>
+                        <p className="text-sm text-text-secondary leading-relaxed max-w-md mx-auto">
+                            "Built for speed!"
+                        </p>
 
                         <div className="grid grid-cols-2 gap-4 max-w-sm mx-auto">
                             <a
                                 href="https://github.com/shubham-pathak1/ciel"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
+                                className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
                             >
-                                <Github size={16} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
+                                <Github size={14} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
                                 GitHub
                             </a>
                             <a
                                 href="https://github.com/shubham-pathak1/ciel/blob/main/LICENSE"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
+                                className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
                             >
-                                <FileText size={16} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
+                                <FileText size={14} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
                                 License
                             </a>
                         </div>
