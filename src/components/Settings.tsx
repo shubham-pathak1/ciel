@@ -472,6 +472,15 @@ export function Settings() {
                                 <FileText size={14} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
                                 License
                             </a>
+                            <a
+                                href="https://ciel-app.vercel.app/"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="col-span-2 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
+                            >
+                                <Globe size={14} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
+                                Visit Website
+                            </a>
                         </div>
                     </div>
                 );
