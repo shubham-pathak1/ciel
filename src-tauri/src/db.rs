@@ -1,27 +1,34 @@
-//! Database module for Ciel
-//!
-//! Handles all SQLite operations including:
-//! - Database initialization and migrations
-//! - Download CRUD operations
-//! - Settings storage
+//! Ciel Database Module
+//! 
+//! This module handles the persistence layer of the application using SQLite.
+//! It manages the lifecycle of:
+//! - **Downloads**: Metadata, status, and progress for all download types (HTTP, Torrent, Video).
+//! - **Settings**: A flexible key-value store for application configuration.
+//! - **Chunks**: Segment metadata used for resuming multi-connection HTTP downloads.
+//! - **History**: An event log for auditing download activities (creation, errors, completion).
 
 use rusqlite::{Connection, Result as SqliteResult};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Application database state
+/// Shared state holding the absolute path to the SQLite database file.
 pub struct DbState {
     pub path: String,
 }
 
-/// Download status enum
+/// Represents the current lifecycle stage of a download.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum DownloadStatus {
+    /// Download is in the queue, waiting for resources.
     Queued,
+    /// Data is actively being transferred.
     Downloading,
+    /// User or system has temporarily halted the transfer.
     Paused,
+    /// Transfer successfully finished and verified.
     Completed,
+    /// An unrecoverable error occurred during transfer.
     Error,
 }
 
@@ -48,16 +55,20 @@ impl DownloadStatus {
     }
 }
 
-/// Download protocol type
+/// Categorizes the download by its source protocol or content type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum DownloadProtocol {
+    /// Standard web download (Direct Link).
     Http,
+    /// Peer-to-peer download (Magnet/Torrent).
     Torrent,
+    /// Extracted media stream (YouTube, etc.).
     Video,
 }
 
 impl DownloadProtocol {
+    /// Serializes the enum to a string for database storage.
     pub fn as_str(&self) -> &'static str {
         match self {
             DownloadProtocol::Http => "http",
@@ -66,6 +77,7 @@ impl DownloadProtocol {
         }
     }
 
+    /// Deserializes a string from the database back into the enum.
     pub fn from_str(s: &str) -> Self {
         match s {
             "torrent" => DownloadProtocol::Torrent,
@@ -75,30 +87,48 @@ impl DownloadProtocol {
     }
 }
 
-/// Download record
+/// The primary data structure representing a download record in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Download {
+    /// Unique UUID (v4) string.
     pub id: String,
+    /// Source URL (Direct Link, Magnet, or Page URL).
     pub url: String,
+    /// Display name of the file.
     pub filename: String,
+    /// Absolute target path on the local filesystem.
     pub filepath: String,
+    /// Total expected size in bytes.
     pub size: i64,
+    /// Bytes successfully written to disk.
     pub downloaded: i64,
     pub status: DownloadStatus,
     pub protocol: DownloadProtocol,
+    /// Instantaneous transfer speed in bytes/sec.
     pub speed: i64,
+    /// Number of active network connections.
     pub connections: i32,
+    /// ISO 8601 creation timestamp.
     pub created_at: String,
+    /// ISO 8601 completion timestamp.
     pub completed_at: Option<String>,
+    /// Human-readable error details if status is Error.
     pub error_message: Option<String>,
+    /// BitTorrent Info Hash (Hex string).
     pub info_hash: Option<String>,
+    /// Extracted video/torrent metadata (JSON string).
     pub metadata: Option<String>,
+    /// Custom User-Agent used for the request.
     pub user_agent: Option<String>,
+    /// Request cookies for authenticated downloads.
     pub cookies: Option<String>,
+    /// Organizational category (Movies, Music, etc.).
     pub category: String,
 }
 
-/// Initialize the database with schema
+/// Bootstraps the SQLite database, creates tables, and applies schema migrations.
+/// 
+/// This is called once during application startup in `lib.rs`.
 pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
     let conn = Connection::open(path)?;
 
@@ -238,6 +268,8 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
     Ok(())
 }
 
+/// Maps a database row to a `Download` struct.
+/// Internal helper used to DRY up mapping logic.
 fn row_to_download(row: &rusqlite::Row) -> SqliteResult<Download> {
     Ok(Download {
         id: row.get(0)?,
@@ -261,7 +293,7 @@ fn row_to_download(row: &rusqlite::Row) -> SqliteResult<Download> {
     })
 }
 
-/// Get all downloads from database
+/// Retrieves all download records from the database, sorted by creation date (newest first).
 pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
@@ -277,7 +309,7 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
     Ok(downloads)
 }
 
-/// Get completed downloads (History)
+/// Retrieves all downloads that have successfully reached the 'completed' status.
 pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
@@ -294,7 +326,7 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     Ok(downloads)
 }
 
-/// Insert a new download
+/// Persists a new download record to the database.
 pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> SqliteResult<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
@@ -324,7 +356,7 @@ pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> Sqlit
     Ok(())
 }
 
-/// Update download status
+/// Updates the status field (e.g., from 'Downloading' to 'Paused') for a specific record.
 pub fn update_download_status<P: AsRef<Path>>(
     db_path: P,
     id: &str,
@@ -338,7 +370,7 @@ pub fn update_download_status<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Update download progress
+/// Periodically called to update the current byte count and transfer speed.
 pub fn update_download_progress<P: AsRef<Path>>(
     db_path: P,
     id: &str,
@@ -353,7 +385,7 @@ pub fn update_download_progress<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Update download size
+/// Updates the total size of a download. Useful when size is determined after metadata extraction.
 pub fn update_download_size<P: AsRef<Path>>(
     db_path: P,
     id: &str,
@@ -367,14 +399,14 @@ pub fn update_download_size<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Delete a download
+/// Removes a download record and its associated chunks/history from the database.
 pub fn delete_download_by_id<P: AsRef<Path>>(db_path: P, id: &str) -> SqliteResult<()> {
     let conn = Connection::open(db_path)?;
     conn.execute("DELETE FROM downloads WHERE id = ?1", [id])?;
     Ok(())
 }
 
-/// Get a setting value
+/// Retrieves a configuration value by its unique key. Returns `None` if not found.
 pub fn get_setting<P: AsRef<Path>>(db_path: P, key: &str) -> SqliteResult<Option<String>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
@@ -382,7 +414,7 @@ pub fn get_setting<P: AsRef<Path>>(db_path: P, key: &str) -> SqliteResult<Option
     Ok(result)
 }
 
-/// Update a setting
+/// Stores or updates a configuration value in the `settings` table.
 pub fn set_setting<P: AsRef<Path>>(db_path: P, key: &str, value: &str) -> SqliteResult<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
@@ -392,7 +424,8 @@ pub fn set_setting<P: AsRef<Path>>(db_path: P, key: &str, value: &str) -> Sqlite
     Ok(())
 }
 
-/// Check if a filepath already exists in the downloads table
+/// Searches for an existing download by its source URL.
+/// Used to prevent redundant transfers or to resume existing ones.
 pub fn find_download_by_url<P: AsRef<Path>>(db_path: P, url: &str) -> SqliteResult<Option<Download>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare("SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category FROM downloads WHERE url = ?1")?;
@@ -412,7 +445,7 @@ pub fn check_filepath_exists<P: AsRef<Path>>(db_path: P, filepath: &str) -> Sqli
     Ok(count > 0)
 }
 
-/// Chunks management
+/// Stores a batch of chunk metadata for multi-threaded HTTP downloads.
 pub fn insert_chunks<P: AsRef<Path>>(db_path: P, chunks: Vec<crate::downloader::ChunkRecord>) -> SqliteResult<()> {
     let mut conn = Connection::open(db_path)?;
     let tx = conn.transaction()?;

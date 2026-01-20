@@ -11,21 +11,27 @@ use tokio::sync::mpsc;
 use tokio::io::{AsyncWriteExt, AsyncSeekExt, BufWriter};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Download engine errors
+/// Represents errors that can occur during an HTTP transfer.
 #[derive(Error, Debug, Clone, Serialize)]
 pub enum DownloadError {
+    /// Failure during network request or response streaming.
     #[error("Network error: {0}")]
     Network(String),
 
+    /// Failure while writing data to the local disk.
     #[error("IO error: {0}")]
     Io(String),
 
+    /// The remote server does not support the HTTP `Range` header, 
+    /// making multi-threaded or resumed downloads impossible.
     #[error("Server does not support range requests")]
     NoRangeSupport,
 
+    /// The transfer was stopped by the user or the system.
     #[error("Download cancelled")]
     Cancelled,
 
+    /// The provided string could not be parsed as a valid URL.
     #[error("Invalid URL: {0}")]
     InvalidUrl(String),
 }
@@ -42,23 +48,24 @@ impl From<std::io::Error> for DownloadError {
     }
 }
 
-/// Download configuration
+/// Immutable configuration for an HTTP download session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadConfig {
-    pub id: String, // Added id
-    /// URL to download from
+    /// Internal Ciel UUID.
+    pub id: String, 
+    /// Source web URL.
     pub url: String,
-    /// Target file path
+    /// Absolute target path on disk.
     pub filepath: PathBuf,
-    /// Number of connections to use
+    /// Maximum number of concurrent TCP connections.
     pub connections: u8,
-    /// Chunk size in bytes (default: 5MB)
+    /// Size of each work unit in bytes.
     pub chunk_size: u64,
-    /// Speed limit in bytes per second (0 = unlimited)
+    /// Throttling limit (bytes/sec).
     pub speed_limit: u64,
-    /// Custom User-Agent
+    /// Custom User-Agent string.
     pub user_agent: Option<String>,
-    /// Custom Cookies
+    /// Optional cookies for authenticated sessions.
     pub cookies: Option<String>,
 }
 
@@ -77,24 +84,21 @@ impl Default for DownloadConfig {
     }
 }
 
-/// Download progress information
+/// Snapshot of the current transfer state, emitted to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadProgress {
-    pub id: String, // Added id
-    /// Total size in bytes
+    pub id: String,
     pub total: u64,
-    /// Downloaded bytes
     pub downloaded: u64,
-    /// Current speed in bytes per second
+    /// Bytes per second (instantanous).
     pub speed: u64,
-    /// Estimated time remaining in seconds
+    /// Calculated seconds remaining based on current speed.
     pub eta: u64,
-    /// Active connections
     pub connections: u8,
-    pub speed_limit: u64, // bytes per second, 0 for no limit
+    pub speed_limit: u64,
 }
 
-/// Chunk record for database persistence
+/// Persistence model for a single byte-range segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkRecord {
     pub download_id: String,
@@ -103,16 +107,25 @@ pub struct ChunkRecord {
     pub downloaded: i64,
 }
 
-/// Chunk information for active download
+/// A discrete unit of work for a single worker thread.
 #[derive(Debug, Clone, Copy)]
 struct WorkChunk {
+    /// Byte offset where the chunk starts.
     start: u64,
+    /// Byte offset where the chunk ends.
     end: u64,
+    /// Number of bytes already successfully transferred in this chunk.
     downloaded: u64,
-    _index: usize, // Index in the original chunk list
+    _index: usize,
 }
 
-/// Multi-connection downloader
+/// A sophisticated, multi-threaded HTTP download engine.
+/// 
+/// It implements:
+/// - **Parallel TCP Connections**: Spawns multiple workers to saturate bandwidth.
+/// - **Resumable Transfers**: Uses SQLite to track chunk progress.
+/// - **Speed Throttling**: A custom token-bucket-like algorithm for bandwidth management.
+/// - **Cancellable Tasks**: Integrated with `tokio` cancellation signals.
 pub struct Downloader {
     client: Client,
     config: DownloadConfig,
@@ -167,6 +180,7 @@ impl Downloader {
         }
     }
 
+    /// Builder: Attaches a database path to the downloader for chunk persistence/resume support.
     pub fn with_db(mut self, db_path: String) -> Self {
         self.db_path = Some(db_path);
         self
@@ -176,11 +190,13 @@ impl Downloader {
         self.progress.clone()
     }
 
+    /// Builder: Attaches an external cancellation signal.
     pub fn with_cancel_signal(mut self, signal: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.cancel_signal = Some(signal);
         self
     }
 
+    /// Computes the SHA-256 hash of the downloaded file and compares it with the expected value.
     pub async fn verify_checksum(&self, expected_hash: &str) -> Result<bool, DownloadError> {
         let filepath = &self.config.filepath;
         let mut file = File::open(filepath)?;
@@ -198,6 +214,13 @@ impl Downloader {
         Ok(hex_result == expected_hash.to_lowercase())
     }
 
+    /// The primary entry point for starting a download.
+    /// 
+    /// This method manages the entire transfer lifecycle:
+    /// 1. Metadata discovery (Range support, Total size).
+    /// 2. Chunk calculation and database synchronization.
+    /// 3. Worker orchestration (spawning parallel tasks).
+    /// 4. Real-time progress reporting.
     pub async fn download<F>(&self, on_progress: F) -> Result<(), DownloadError>
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
@@ -345,10 +368,9 @@ impl Downloader {
                     let cancel_signal = self.cancel_signal.clone();
                     let last_emit_clone = self.last_emit.clone();
                     
-                    // Capture config for worker to avoid escaping self
-                    let global_speed_limit = self.config.speed_limit;
-                    let num_connections = self.config.connections;
-
+                    // WORKER LIFECYCLE
+                    // Spawns an async task to handle a single range request. 
+                    // Workers communicate progress back via atomic variables and a shared `progress` struct.
                     tokio::spawn(async move {
                         let mut attempts = 0;
                         let max_retries = 3;
@@ -400,13 +422,12 @@ impl Downloader {
                                     chunk_file.write_all(&bytes).await?;
                                     let len = bytes.len() as u64;
 
-                                    // Local Rate Limiting Calculation
-                                    // If speed limit is set, we calculate how much time this chunk "costs"
-                                    // based on the per_worker share of the global limit.
+                                    // BANDWIDTH THROTTLING
+                                    // Implements a simple wait-based throttle.
+                                    // The global limit is distributed across all active workers.
                                     if global_speed_limit > 0 {
                                         let per_worker_limit = global_speed_limit / (num_connections as u64).max(1);
                                         if per_worker_limit > 0 {
-                                            // Cost in milliseconds: (bytes / bytes_per_sec) * 1000
                                             let cost_ms = (len * 1000) / per_worker_limit;
                                             if cost_ms > 0 {
                                                 tokio::time::sleep(std::time::Duration::from_millis(cost_ms)).await;
@@ -420,11 +441,13 @@ impl Downloader {
                                     // Lock-free progress update
                                     let current_total_downloaded = downloaded_atomic.fetch_add(len, Ordering::Relaxed) + len;
 
-                                    // Throttled progress emission
+                                    // PROGRESS EMISSION
+                                    // To prevent UI lag, we only emit progress events (via Tauri) 
+                                    // every 150ms rather than on every new byte.
                                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                                     let last = last_emit_clone.load(std::sync::atomic::Ordering::Relaxed);
                                     
-                                    if now - last > 150 { // Increased to 150ms for performance
+                                    if now - last > 150 {
                                         if last_emit_clone.compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
                                             let mut p = progress.lock().unwrap();
                                             p.downloaded = current_total_downloaded;
@@ -511,6 +534,10 @@ impl Downloader {
         Ok(())
     }
 
+    /// Fallback: Downloads a file using a single TCP connection.
+    /// 
+    /// Used when the server lacks `Range` support or for very small files where 
+    /// multi-threading overhead is counter-productive.
     async fn download_single_connection<F>(&self, on_progress: F) -> Result<(), DownloadError>
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
@@ -564,7 +591,7 @@ impl Downloader {
     }
 }
 
-/// Check if server supports range requests
+/// Queries a URL using a `HEAD` request to verify if it supports segmented downloads.
 pub async fn check_range_support(client: &Client, url: &str) -> Result<(bool, u64), DownloadError> {
     let response = client.head(url).send().await.map_err(|e| DownloadError::Network(e.to_string()))?;
 
@@ -584,7 +611,7 @@ pub async fn check_range_support(client: &Client, url: &str) -> Result<(bool, u6
     Ok((supports_range, content_length))
 }
 
-/// Extract filename from URL or Content-Disposition header
+/// Heuristic: Extracts a probable filename from the URL or the `Content-Disposition` header.
 pub fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> String {
     // 1. Try Content-Disposition header first
     if let Some(cd) = headers.get("content-disposition") {

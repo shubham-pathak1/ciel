@@ -1,3 +1,9 @@
+/**
+ * @file Sidebar.tsx
+ * @description Main navigation component for the application.
+ * Manages view switching and category-based filtering for the download queue.
+ */
+
 import {
     Download,
     PlayCircle,
@@ -15,6 +21,11 @@ import { motion } from "framer-motion";
 
 type View = "downloads" | "active" | "completed" | "settings" | "Video" | "Audio" | "Compressed" | "Software" | "Documents" | "Other";
 
+/**
+ * Props for the Sidebar component.
+ * @property currentView - The currently active view or category filter.
+ * @property onViewChange - Callback to switch the active view.
+ */
 interface SidebarProps {
     currentView: View;
     onViewChange: (view: View) => void;
@@ -42,6 +53,14 @@ const categoryItems: NavItem[] = [
     { id: "Other", label: "Other", icon: MoreHorizontal },
 ];
 
+/**
+ * Sidebar Component.
+ * 
+ * Responsibilities:
+ * - Displays primary navigation items (All Downloads, Active, Finished, Settings).
+ * - Displays a list of file categories for targeted filtering.
+ * - Managed fluid transitions between views using `framer-motion`.
+ */
 export function Sidebar({ currentView, onViewChange }: SidebarProps) {
     return (
         <aside className="w-64 flex flex-col items-center py-6 px-4 bg-brand-primary border-r border-surface-border z-20">

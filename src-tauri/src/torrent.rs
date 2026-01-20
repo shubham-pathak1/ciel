@@ -6,26 +6,40 @@ use tauri::{AppHandle, Emitter};
 use serde::{Serialize, Deserialize};
 use hex;
 
+/// Summary of a single file within a torrent.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TorrentFile {
     pub name: String,
     pub size: u64,
+    /// Internal index used by `librqbit` to identify the file.
     pub index: usize,
 }
 
+/// Consolidated metadata for a BitTorrent source.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TorrentInfo {
     pub name: String,
     pub total_size: u64,
+    /// Flattened list of all files available in the torrent.
     pub files: Vec<TorrentFile>,
 }
 
+/// The core engine for BitTorrent downloads.
+/// 
+/// It wraps a `librqbit` session and maintains a mapping of active
+/// download handles to facilitate real-time monitoring and control.
 pub struct TorrentManager {
+    /// The underlying BitTorrent session.
     session: Option<Arc<Session>>,
-    active_torrents: Arc<Mutex<HashMap<String, Arc<ManagedTorrent>>>>, // Maps Ciel ID to librqbit handle
+    /// Tracks handles for active torrents, indexed by Ciel's internal UUID.
+    active_torrents: Arc<Mutex<HashMap<String, Arc<ManagedTorrent>>>>,
 }
 
 impl TorrentManager {
+    /// Creates a new `TorrentManager` and initializes the `librqbit` session.
+    /// 
+    /// Note: `persistence` is disabled to ensure that Ciel maintains total control
+    /// over the download list via its own SQLite database.
     pub async fn new(_force_encryption: bool) -> Result<Self, String> {
         // Use a temporary session directory that gets cleared on startup.
         // This prevents stale session state from causing "ghost" torrents.
@@ -58,6 +72,7 @@ impl TorrentManager {
         }
     }
 
+    /// Adds a new magnet link or torrent file to the active session.
     pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active (port conflict or initialization error)")?;
         
@@ -221,6 +236,10 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// Metadata Sniffer: Briefly joins a swarm to extract the file tree and total size.
+    /// 
+    /// This adds the torrent to a temporary directory with file downloads disabled,
+    /// waits for the metadata to arrive, then deletes the "ghost" torrent from the session.
     pub async fn analyze_magnet(&self, magnet: String) -> Result<TorrentInfo, String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active (port conflict or initialization error)")?;
 
@@ -277,6 +296,7 @@ impl TorrentManager {
         }
     }
 
+    /// Internal: Transitions a selectively-configured torrent from Paused to active.
     pub async fn start_selective(&self, id: &str, _indices: Vec<usize>) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         
@@ -287,6 +307,7 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// Pauses an active torrent in the `librqbit` session.
     pub async fn pause_torrent(&self, id: &str) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         let active = self.active_torrents.lock().await;
@@ -296,6 +317,7 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// Resumes a paused torrent in the `librqbit` session.
     pub async fn resume_torrent(&self, id: &str) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         let active = self.active_torrents.lock().await;
@@ -305,6 +327,8 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// Deletes a torrent and its metadata from the session. 
+    /// Note: Does NOT delete the actual downloaded files from disk.
     pub async fn delete_torrent(&self, id: &str) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         
@@ -321,6 +345,8 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// Forcefully removes a torrent from the session by its info hash.
+    /// Useful for cleaning up "zombie" or "ghost" torrents.
     pub async fn delete_torrent_by_hash(&self, hash_str: String) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         
@@ -342,8 +368,8 @@ impl TorrentManager {
         Ok(())
     }
 
-    /// Extracts the info hash from a magnet URL.
-    /// Magnet format: magnet:?xt=urn:btih:INFOHASH&...
+    /// Helper: Parses a magnet link to extract the unique info hash.
+    /// Supports both hex and base32 variants.
     fn extract_info_hash_from_magnet(magnet: &str) -> Option<String> {
         // Find the btih: prefix
         let magnet_lower = magnet.to_lowercase();

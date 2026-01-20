@@ -1,6 +1,15 @@
+/**
+ * @file VideoPreview.tsx
+ * @description Provides a quality-selection interface for video platform downloads (YouTube, etc.).
+ * Handles format filtering and audio/video stream muxing logic.
+ */
+
 import React from 'react';
 import { Play, Download, Music, Monitor } from 'lucide-react';
 
+/**
+ * Represents a specific stream format provided by yt-dlp.
+ */
 interface VideoFormat {
     format_id: string;
     extension: string;
@@ -12,6 +21,9 @@ interface VideoFormat {
     vcodec: string | null;
 }
 
+/**
+ * Extracted metadata for a video URL.
+ */
 interface VideoMetadata {
     title: string;
     thumbnail: string;
@@ -26,6 +38,15 @@ interface VideoPreviewProps {
     onCancel: () => void;
 }
 
+/**
+ * VideoPreview Component.
+ * 
+ * Responsibilities:
+ * - Displays video title, thumbnail, and duration.
+ * - Filters out unusable or proprietary formats (e.g., m3u8 manifests).
+ * - Implements a "Smart Muxing" strategy: if a high-quality video format lacks 
+ *   audio, it automatically selects an appropriate audio-only stream for the backend.
+ */
 export const VideoPreview: React.FC<VideoPreviewProps> = ({ metadata, onDownload, onCancel }) => {
     const [selectedFormat, setSelectedFormat] = React.useState<string | null>(null);
 

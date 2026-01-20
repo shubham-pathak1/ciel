@@ -1,3 +1,8 @@
+//! Video Platform Integration
+//! 
+//! This module leverages `yt-dlp` to extract metadata and download media 
+//! from thousands of supported video sites (YouTube, Vimeo, Twitter, etc.).
+
 use crate::db::{self, DbState, Download, DownloadStatus, DownloadProtocol};
 use crate::commands::{DownloadManager, resolve_download_path, ensure_unique_path, execute_post_download_actions};
 use crate::bin_resolver::{self, Binary};
@@ -5,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_shell::process::CommandEvent;
 
+/// Comprehensive metadata for a detected video source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoMetadata {
     pub title: String,
@@ -14,6 +20,7 @@ pub struct VideoMetadata {
     pub url: String,
 }
 
+/// A specific quality/format option for a video (e.g., 1080p MP4, or Audio-only M4A).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoFormat {
     pub format_id: String,
@@ -26,6 +33,7 @@ pub struct VideoFormat {
     pub vcodec: Option<String>,
 }
 
+/// Bridge: Uses `yt-dlp --dump-json` to retrieve all available formats and metadata for a URL.
 #[tauri::command]
 pub async fn analyze_video_url(app: AppHandle, url: String) -> Result<VideoMetadata, String> {
     let output = bin_resolver::resolve_bin(&app, Binary::YtDlp)
@@ -62,7 +70,7 @@ pub async fn analyze_video_url(app: AppHandle, url: String) -> Result<VideoMetad
             let ext = f["ext"].as_str().unwrap_or("").to_string();
             let format_id = f["format_id"].as_str().unwrap_or("").to_string();
             
-            // Filter out mhtml and unwanted formats
+            // Filter out mhtml and unwanted formats for a cleaner Ciel UI.
             if ext == "mhtml" || format_id.contains("mhtml") || ext == "webm" {
                 continue;
             }
@@ -96,6 +104,7 @@ pub async fn analyze_video_url(app: AppHandle, url: String) -> Result<VideoMetad
     })
 }
 
+/// Bridge: Registers a video download task using specific format IDs for video and audio.
 #[tauri::command]
 pub async fn add_video_download(
     app: AppHandle,
@@ -112,13 +121,11 @@ pub async fn add_video_download(
 ) -> Result<(), String> {
     let id = uuid::Uuid::new_v4().to_string();
     
-    // Ensure the filepath has the correct extension for muxed output (mp4)
-    // unless it's an audio-only format.
+    // Auto-Correct: Ensure the filepath has a valid container extension (MP4).
     let mut adjusted_filepath = filepath.clone();
     let is_audio = filepath.ends_with(".m4a") || filepath.ends_with(".mp3") || filepath.ends_with(".aac") || filepath.ends_with(".opus");
     
     if !is_audio && !filepath.to_lowercase().ends_with(".mp4") {
-        // Change or add .mp4 extension
         if let Some(pos) = filepath.rfind('.') {
             adjusted_filepath = format!("{}.mp4", &filepath[..pos]);
         } else {
@@ -129,13 +136,11 @@ pub async fn add_video_download(
     let resolved_path = resolve_download_path(&app, &db_state.path, &adjusted_filepath, output_folder);
     let final_path = ensure_unique_path(&db_state.path, resolved_path);
 
-    // Extract the final unique filename from the path
     let final_filename = std::path::Path::new(&final_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| adjusted_filepath.clone());
     
-    // Store specific audio choice in metadata
     let meta_json = serde_json::json!({
         "format_id": format_id,
         "audio_id": audio_id,
@@ -168,6 +173,7 @@ pub async fn add_video_download(
     start_video_download_task(app, db_state.path.clone(), manager.inner().clone(), download).await
 }
 
+/// Orchestrator: Spawns the `yt-dlp` child process and monitors its regex-based progress stream.
 pub async fn start_video_download_task(
     app: AppHandle,
     db_path: String,
@@ -182,21 +188,18 @@ pub async fn start_video_download_task(
     let id_clone = id.clone();
     let manager_clone = manager.clone();
 
-    // Parse format selection from metadata
     let (format_id, audio_id) = if let Some(meta_str) = &download.metadata {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(meta_str) {
             let fid = json["format_id"].as_str().unwrap_or("best").to_string();
             let aid = json["audio_id"].as_str().map(|s| s.to_string());
             (fid, aid)
         } else {
-            // Legacy/Fallback: metadata is just the format_id string
             (meta_str.clone(), None)
         }
     } else {
         ("best".to_string(), None)
     };
 
-    // Create cancellation channel
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     manager.add_active(id.clone(), tx).await;
 
@@ -206,10 +209,6 @@ pub async fn start_video_download_task(
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(8);
 
-    // Construct format selector
-    // If specific audio ID is provided, merge it.
-    // If None, assume video file already has audio (progressive) OR user selected audio-only.
-    // We NO LONGER blindly append +bestaudio. Smart frontend does the picking.
     let format_selector = if let Some(aid) = audio_id {
         format!("{}+{}", format_id, aid)
     } else {
@@ -249,7 +248,6 @@ pub async fn start_video_download_task(
             .spawn()
             .expect("Failed to start yt-dlp");
 
-        // Initial total from metadata if available
         let expected_total_size = if let Some(ref meta_str) = download.metadata {
              if let Ok(json) = serde_json::from_str::<serde_json::Value>(&meta_str) {
                  json["total_size"].as_u64().unwrap_or(0)
@@ -259,27 +257,24 @@ pub async fn start_video_download_task(
         let mut accumulated_completed_bytes: u64 = 0;
         let mut current_file_max_size: u64 = 0;
         let mut aborted = false;
-
-        // Track the filename we are currently processing to detect switches
-        // let mut current_destination = String::new();
         let mut status_text: Option<String> = Some("Starting...".to_string());
 
         while let Some(event) = events.recv().await {
             match event {
                 CommandEvent::Stdout(line_bytes) => {
                     let line = String::from_utf8_lossy(&line_bytes);
-                    // Detect status/phase changes
+                    
+                    // Regex-less pattern matching for yt-dlp's dynamic output.
                     if line.starts_with("[youtube]") {
                         status_text = Some("Extracting info...".to_string());
                     } else if line.starts_with("[Merger]") {
-                        status_text = Some("Assembling...".to_string());
+                        status_text = Some("Assembling (Muxing)...".to_string());
                     } else if line.starts_with("[ExtractAudio]") {
                         status_text = Some("Extracting Audio...".to_string());
                     } else if line.starts_with("[ffmpeg]") {
-                        status_text = Some("Processing...".to_string());
+                        status_text = Some("Processing (FFmpeg)...".to_string());
                     }
 
-                    // Detect new file start
                     if line.contains("[download] Destination:") {
                         if current_file_max_size > 0 {
                             accumulated_completed_bytes += current_file_max_size;
@@ -345,19 +340,10 @@ pub async fn start_video_download_task(
                         }));
                     }
                 }
-                CommandEvent::Stderr(line_bytes) => {
-                    let _line = String::from_utf8_lossy(&line_bytes);
-                }
-                CommandEvent::Terminated(payload) => {
-                    if !payload.code.map_or(false, |code| code == 0) {
-                         // We'll handle overall failure after the loop
-                    }
-                    break;
-                }
+                CommandEvent::Terminated(_) => break,
                 _ => {}
             }
 
-            // Check for termination signal
             if rx.try_recv().is_ok() {
                 let _ = child.kill();
                 aborted = true;
@@ -368,13 +354,8 @@ pub async fn start_video_download_task(
         }
 
         if !aborted {
-            // The loop finishes when CommandEvent::Terminated is received
-            // or when the stream ends.
-            
-            // Wait briefly for OS to finalize file handle
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            // Update final size from disk
             if let Ok(meta) = std::fs::metadata(&final_path) {
                 let final_size = meta.len() as i64;
                 let _ = db::update_download_size(&db_path_clone, &id_clone, final_size);
@@ -384,7 +365,6 @@ pub async fn start_video_download_task(
             let _ = db::update_download_status(&db_path_clone, &id_clone, DownloadStatus::Completed);
             let _ = app_clone.emit("download-completed", id_clone.clone());
 
-            // Post-Download Actions
             let download_clone = download.clone();
             execute_post_download_actions(app_clone.clone(), db_path_clone.clone(), download_clone).await;
         }
@@ -395,6 +375,7 @@ pub async fn start_video_download_task(
     Ok(())
 }
 
+/// Helper: Converts human-readable sizes (e.g. "5.2MiB") into raw bytes.
 fn parse_size(s: &str) -> u64 {
     let s = s.to_lowercase();
     let factor = if s.contains("gb") || s.contains("gib") { 1024 * 1024 * 1024 }
@@ -406,6 +387,7 @@ fn parse_size(s: &str) -> u64 {
     (num.parse::<f64>().unwrap_or(0.0) * factor as f64) as u64
 }
 
+/// Helper: Converts timestamp strings (e.g. "01:30") into total seconds.
 fn parse_eta(s: &str) -> u64 {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() == 2 {

@@ -11,9 +11,12 @@ use tokio::sync::mpsc;
 
 use tauri_plugin_notification::NotificationExt;
 
-/// Manager for active downloads
+/// Orchestrates the lifecycle of active HTTP downloads.
+/// 
+/// It acts as a registry for ongoing transfers, allowing the application
+/// to send cancellation signals to specific download tasks via `mpsc` channels.
 pub struct DownloadManager {
-    // Maps download ID to a cancellation sender
+    /// Internal map linking Download IDs to their respective cancellation senders.
     active_downloads: Arc<Mutex<HashMap<String, mpsc::Sender<()>>>>,
 }
 
@@ -24,19 +27,23 @@ impl DownloadManager {
         }
     }
 
+    /// Registers a new active download and its cancellation hook.
     pub async fn add_active(&self, id: String, cancel_tx: mpsc::Sender<()>) {
         let mut active = self.active_downloads.lock().await;
         active.insert(id, cancel_tx);
     }
 
+    /// Unregisters a download, typically called after a successful completion or an error.
     pub async fn remove_active(&self, id: &str) {
         let mut active = self.active_downloads.lock().await;
         active.remove(id);
     }
 
+    /// Signals an active download task to abort immediately.
     pub async fn cancel(&self, id: &str) {
         let mut active = self.active_downloads.lock().await;
         if let Some(tx) = active.get(id) {
+            // Signal the async task to stop.
             let _ = tx.send(()).await;
         }
         active.remove(id);
@@ -48,14 +55,23 @@ impl DownloadManager {
 }
 
 // ... types for validation ...
+/// Detailed metadata discovered during URL validation.
 #[derive(serde::Serialize)]
 pub struct UrlTypeInfo {
+    /// True if the URL follows the `magnet:` protocol.
     is_magnet: bool,
+    /// The MIME type reported by the server (e.g., `application/zip`).
     content_type: Option<String>,
+    /// Total file size reported by the server in bytes.
     content_length: Option<u64>,
+    /// A suggested filename extracted from the `Content-Disposition` header.
     hinted_filename: Option<String>,
 }
 
+/// Performs a lightweight inspection of a URL to determine its type and metadata.
+/// 
+/// Instead of downloading the full file, it uses HTTP `GET` with a `Range` header
+/// or sniffs the first few bytes to extract headers and verify the content type.
 #[tauri::command]
 pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
     if url.starts_with("magnet:") {
@@ -151,7 +167,12 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
     })
 }
 
-/// Helper to resolve authentic filepath
+/// Resolves a human-provided path into a valid, absolute filesystem path.
+/// 
+/// It handles:
+/// - Absolute vs Relative paths.
+/// - System-specific "Downloads" folder fallback.
+/// - Custom user-defined download directories.
 pub(crate) fn resolve_download_path(app: &tauri::AppHandle, db_path: &str, provided_path: &str, override_folder: Option<String>) -> String {
     let p = Path::new(provided_path);
     if p.is_absolute() {
@@ -196,7 +217,8 @@ pub(crate) fn resolve_download_path(app: &tauri::AppHandle, db_path: &str, provi
     absolute_path.to_string_lossy().to_string()
 }
 
-/// Helper to ensure unique filename if file already exists on disk OR in database
+/// Prevents file overwriting by appending a numeric suffix (e.g., "file (1).txt") 
+/// if a collision is detected on the disk OR in the database.
 pub(crate) fn ensure_unique_path(db_path: &str, path_str: String) -> String {
     let path = Path::new(&path_str);
     
@@ -230,6 +252,7 @@ pub(crate) fn ensure_unique_path(db_path: &str, path_str: String) -> String {
     }
 }
 
+/// Map file extensions to broad categories for UI filtering.
 pub fn get_category_from_filename(filename: &str) -> String {
     let path = Path::new(filename);
     let extension = path.extension()
@@ -248,7 +271,9 @@ pub fn get_category_from_filename(filename: &str) -> String {
 }
 
 
-/// Execute post-download actions (Open folder, Shutdown, etc.)
+/// Triggers post-transfer logic like opening the target folder or system power management.
+/// 
+/// This is called automatically when a download transitions to the 'Completed' status.
 pub (crate) async fn execute_post_download_actions(app: AppHandle, db_path: String, download: Download) {
     // 1. Open Folder on Finish
     let open_folder = db::get_setting(&db_path, "open_folder_on_finish")
@@ -304,13 +329,19 @@ pub (crate) async fn execute_post_download_actions(app: AppHandle, db_path: Stri
     }
 }
 
-/// Get all downloads
+/// Bridge: Fetches the full list of downloads for the Frontend.
 #[tauri::command]
 pub fn get_downloads(db_state: State<DbState>) -> Result<Vec<Download>, String> {
     db::get_all_downloads(&db_state.path).map_err(|e| e.to_string())
 }
 
-/// Add a new download
+/// Bridge: Initiates a new HTTP download.
+/// 
+/// This command:
+/// 1. Resolves and validates the target filename (sniffing headers if needed).
+/// 2. Ensures a unique path to prevent collisions.
+/// 3. Persists the record to the database.
+/// 4. Dispatches the async download task.
 #[tauri::command]
 pub async fn add_download(
     app: AppHandle,
@@ -424,7 +455,13 @@ pub async fn add_download(
     Ok(download)
 }
 
-/// Add a new torrent download
+/// Bridge: Initiates a new BitTorrent download (Magnet or .torrent file).
+/// 
+/// This command handles:
+/// - Metadata extraction from magnet query parameters.
+/// - Duplicate isolation: If a torrent with the same name exists, it creates 
+///   a dedicated sub-folder to prevent file/hash collisions.
+/// - Registration with the `TorrentManager`.
 #[tauri::command]
 pub async fn add_torrent(
     app: AppHandle,
@@ -506,7 +543,10 @@ pub async fn add_torrent(
     Ok(download)
 }
 
-/// Analyze a torrent/magnet to get metadata
+/// Bridge: Inspects a torrent source to retrieve its file list and metadata.
+/// 
+/// This is used for "Selective Downloads" where the user chooses specific 
+/// files before starting the transfer.
 #[tauri::command]
 pub async fn analyze_torrent(
     _app: AppHandle,
@@ -516,7 +556,7 @@ pub async fn analyze_torrent(
     torrent_manager.analyze_magnet(url).await
 }
 
-/// Start a torrent that was previously analyzed and added (starts as paused)
+/// Bridge: Starts a previously analyzed torrent with a specific file selection.
 #[tauri::command]
 pub async fn start_selective_torrent(
     _app: AppHandle,
@@ -527,7 +567,13 @@ pub async fn start_selective_torrent(
     torrent_manager.start_selective(&id, indices).await
 }
 
-/// Helper function to start the background download task
+/// Internal: Spawns the long-running async task for an HTTP download.
+/// 
+/// It sets up:
+/// - Real-time progress emission via Tauri events.
+/// - Graceful cancellation handling.
+/// - Database persistence of progress and final status.
+/// - OS-level notifications on completion/failure.
 async fn start_download_task(
     app: AppHandle,
     db_path: String,
@@ -637,7 +683,10 @@ async fn start_download_task(
     Ok(())
 }
 
-/// Pause a download
+/// Bridge: Pauses an active transfer.
+/// 
+/// For HTTP, it signals the worker to stop. For Torrents, it communicates
+/// directly with the `librqbit` session.
 #[tauri::command]
 pub async fn pause_download(
     db_state: State<'_, DbState>,
@@ -659,7 +708,7 @@ pub async fn pause_download(
         .map_err(|e| e.to_string())
 }
 
-/// Resume a download
+/// Bridge: Resumes a previously paused transfer.
 #[tauri::command]
 pub async fn resume_download(
     app: AppHandle,
@@ -706,13 +755,13 @@ pub async fn resume_download(
     Ok(())
 }
 
-/// Get download history
+/// Bridge: Fetches only the completed downloads for the History view.
 #[tauri::command]
 pub async fn get_history(db_state: State<'_, DbState>) -> Result<Vec<Download>, String> {
     db::get_history(&db_state.path).map_err(|e| e.to_string())
 }
 
-/// Get events for a specific download
+/// Bridge: Retrieves the event log (history) for a specific download.
 #[tauri::command]
 pub async fn get_download_events(
     db_state: State<'_, DbState>,
@@ -721,7 +770,7 @@ pub async fn get_download_events(
     db::get_download_events(&db_state.path, &id).map_err(|e| e.to_string())
 }
 
-/// Delete a download
+/// Bridge: Permanently removes a download from the registry and aborts it if active.
 #[tauri::command]
 pub async fn delete_download(
     db_state: State<'_, DbState>,
@@ -748,24 +797,29 @@ pub async fn delete_download(
     db::delete_download_by_id(&db_state.path, &id).map_err(|e| e.to_string())
 }
 
-/// Get all settings
+/// Bridge: Fetches the entire configuration map.
 #[tauri::command]
 pub fn get_settings(db_state: State<DbState>) -> Result<HashMap<String, String>, String> {
     db::get_all_settings(&db_state.path).map_err(|e| e.to_string())
 }
 
-/// Update a setting
+/// Bridge: Updates a specific configuration key.
 #[tauri::command]
 pub fn update_setting(db_state: State<DbState>, key: String, value: String) -> Result<(), String> {
     db::set_setting(&db_state.path, &key, &value).map_err(|e| e.to_string())
 }
 
-/// Show file in folder
+/// Bridge: Opens the OS file explorer and focuses the downloaded file/folder.
 #[tauri::command]
 pub fn show_in_folder(app: AppHandle, db_state: State<'_, DbState>, path: String) -> Result<(), String> {
     show_in_folder_internal(app, &db_state.path, path)
 }
 
+/// Internal wrapper for "Show in Folder" that handles cross-platform logic.
+/// 
+/// - Windows: Uses `explorer.exe /select` to highlight the file.
+/// - MacOS: Uses `open -R`.
+/// - Linux: Uses `xdg-open` on the parent folder.
 pub fn show_in_folder_internal(app: AppHandle, db_path: &str, path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {

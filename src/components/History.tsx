@@ -1,8 +1,16 @@
+/**
+ * @file History.tsx
+ * @description Provides a searchable view of completed download tasks stored in the persistence layer.
+ */
+
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Search, Trash2, ExternalLink, Calendar, Database, File } from 'lucide-react';
 import clsx from 'clsx';
 
+/**
+ * Represents a historical download record.
+ */
 interface HistoryItem {
     id: string;
     filename: string;
@@ -13,6 +21,14 @@ interface HistoryItem {
     completed_at: string;
 }
 
+/**
+ * History Component.
+ * 
+ * Responsibilities:
+ * - Fetches historical records from the backend database via `get_history`.
+ * - Provides client-side filtering (search) by filename or URL.
+ * - Allows users to locate files on disk or remove records from the archive.
+ */
 export const History: React.FC = () => {
     const [history, setHistory] = useState<HistoryItem[]>([]);
     const [search, setSearch] = useState('');

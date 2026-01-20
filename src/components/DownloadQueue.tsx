@@ -1,3 +1,9 @@
+/**
+ * @file DownloadQueue.tsx
+ * @description The primary view for managing the download queue. 
+ * Orchestrates HTTP, Torrent, and Video downloads by communicating with the Tauri backend.
+ */
+
 import React, { useState, useEffect, useCallback, memo } from "react";
 import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Video as VideoIcon, Database as DatabaseIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -22,11 +28,19 @@ interface TorrentInfo {
     files: TorrentFile[];
 }
 
+/**
+ * Props for the DownloadQueue component.
+ * @property filter - Restricts the visible downloads by their current status.
+ * @property category - Optional tag to further narrow down the displayed list.
+ */
 interface DownloadQueueProps {
     filter: "downloads" | "active" | "completed";
     category?: string;
 }
 
+/**
+ * Represents a single download record from the database.
+ */
 interface DownloadItem {
     id: string;
     filename: string;
@@ -78,11 +92,25 @@ const formatEta = (seconds: number) => {
     return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 };
 
+/**
+ * Main Download Queue Component.
+ * 
+ * Responsibilities:
+ * - Fetches initial download list from the backend.
+ * - Listens for real-time progress events over the Tauri IPC bridge.
+ * - Handles user interactions for pausing, resuming, and deleting downloads.
+ * - Manages "Auto-Catch" modal triggers when interesting URLs are found in the clipboard.
+ */
 export function DownloadQueue({ filter, category }: DownloadQueueProps) {
     const [downloads, setDownloads] = useState<DownloadItem[]>([]);
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
     const [autocatchUrl, setAutocatchUrl] = useState("");
 
+    /**
+     * Refreshes the download list and handles the "Auto-Resume" feature.
+     * Auto-resume is triggered if the application settings allow it, ensuring 
+     * that interrupted downloads restart automatically on app launch.
+     */
     const handleRefreshList = useCallback(async () => {
         try {
             const [downloads, settings] = await Promise.all([
@@ -104,6 +132,15 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
         }
     }, []);
 
+    /**
+     * Side-Effect: IPC Event Listeners
+     * 
+     * Subscribes to backend events:
+     * - `download-progress`: Fine-grained updates for speed, ETA, and bytes.
+     * - `download-completed`: Triggers a full list refresh on completion.
+     * - `download-name-updated`: Updates filename (e.g., after BitTorrent metadata is fetched).
+     * - `autocatch-url`: Detects interesting clipboard links.
+     */
     useEffect(() => {
         handleRefreshList();
 

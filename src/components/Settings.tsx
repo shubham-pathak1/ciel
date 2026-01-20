@@ -1,3 +1,9 @@
+/**
+ * @file Settings.tsx
+ * @description Centralized configuration management for the application.
+ * Handles persistence of user preferences through the Tauri IPC bridge.
+ */
+
 import { useEffect, useState } from "react";
 import logo from "../assets/logo.png";
 import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github, FileText, Cpu, Clock } from "lucide-react";
@@ -5,6 +11,9 @@ import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { open } from "@tauri-apps/plugin-dialog";
 
+/**
+ * Complete application configuration state.
+ */
 interface SettingsState {
     download_path: string;
     max_connections: string;
@@ -22,6 +31,15 @@ interface SettingsState {
     scheduler_pause_time: string;
 }
 
+/**
+ * Settings Component.
+ * 
+ * Responsibilities:
+ * - Loads all preferences from the backend on mount.
+ * - Categorizes settings into logical sections (General, Network, Performance, etc.).
+ * - Sanitizes and serializes boolean/string values for the SQLite storage layer.
+ * - Provides a visual "Save" feedback loop.
+ */
 export function Settings() {
     const [settings, setSettings] = useState<SettingsState>({
         download_path: "./downloads",
@@ -77,6 +95,10 @@ export function Settings() {
         }
     };
 
+    /**
+     * Persists all current state values to the backend database.
+     * Iterates through the state object and calls `update_setting` for each key.
+     */
     const handleSave = async () => {
         setIsSaving(true);
         try {

@@ -1,3 +1,9 @@
+//! Download Scheduler Module
+//! 
+//! This module implements time-based automation, allowing users to schedule
+//! when downloads should start or pause (e.g., to take advantage of off-peak 
+//! ISP bandwidth).
+
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use crate::db;
@@ -5,10 +11,14 @@ use crate::commands::{self, DownloadManager};
 use crate::torrent::TorrentManager;
 use chrono::{Local, Timelike};
 
+/// Starts a background loop that checks the current time every 30 seconds.
+/// 
+/// It trigger bulk actions when the system clock matches the user-defined 
+/// `start_time` or `pause_time`.
 pub fn start_scheduler(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
-            // Check every 30 seconds
+            // Check every 30 seconds to ensure we don't miss the minute transition.
             tokio::time::sleep(Duration::from_secs(30)).await;
 
             let db_state = app.state::<db::DbState>();
@@ -34,17 +44,18 @@ pub fn start_scheduler(app: AppHandle) {
 
             if current_time_str == start_time_str {
                 resume_all_downloads(&app).await;
-                // Sleep extra to avoid re-triggering in the same minute
+                // Protection: Sleep for 61 seconds to avoid triggering multiple times 
+                // within the same minute.
                 tokio::time::sleep(Duration::from_secs(61)).await;
             } else if current_time_str == pause_time_str {
                 pause_all_downloads(&app).await;
-                 // Sleep extra to avoid re-triggering in the same minute
                 tokio::time::sleep(Duration::from_secs(61)).await;
             }
         }
     });
 }
 
+/// Helper: Resumes all Paused or Queued downloads in the database.
 async fn resume_all_downloads(app: &AppHandle) {
     let db_state = app.state::<db::DbState>();
     let manager = app.state::<DownloadManager>();
@@ -65,6 +76,7 @@ async fn resume_all_downloads(app: &AppHandle) {
     }
 }
 
+/// Helper: Pauses all currently active transfers.
 async fn pause_all_downloads(app: &AppHandle) {
     let db_state = app.state::<db::DbState>();
     let manager = app.state::<DownloadManager>();

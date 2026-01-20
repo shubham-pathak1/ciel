@@ -1,14 +1,26 @@
+/**
+ * @file TorrentFileSelector.tsx
+ * @description A modal component that allows users to pick specific files from a torrent 
+ * for selective downloading.
+ */
+
 import React, { useState, useMemo } from 'react';
 import { X, Check, File, Database } from 'lucide-react';
 import { clsx } from 'clsx';
 import { motion } from 'framer-motion';
 
+/**
+ * Metadata for a single file within a Torrent.
+ */
 interface TorrentFile {
     name: string;
     size: number;
     index: number;
 }
 
+/**
+ * Summary of a BitTorrent archive before it is added to the active session.
+ */
 interface TorrentInfo {
     name: string;
     total_size: number;
@@ -21,6 +33,15 @@ interface Props {
     onCancel: () => void;
 }
 
+/**
+ * TorrentFileSelector Component.
+ * 
+ * Responsibilities:
+ * - Renders a hierarchical or flat list of files found in a `.torrent` or magnet metadata.
+ * - Manages a selection set of file indices.
+ * - Calculates the real-time total size of the selected files.
+ * - Triggers the actual download start via `onSelect`.
+ */
 export const TorrentFileSelector: React.FC<Props> = ({ info, onSelect, onCancel }) => {
     const [selectedIndices, setSelectedIndices] = useState<Set<number>>(
         new Set(info.files.map(f => f.index))

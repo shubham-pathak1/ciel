@@ -1,7 +1,21 @@
+/**
+ * @file TitleBar.tsx
+ * @description Custom frameless window title bar.
+ * Implements window decoration and management (minimize, maximize, close) for the Tauri app.
+ */
+
 import { Minus, Square, X } from "lucide-react";
 import logo from "../assets/logo.png";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+/**
+ * TitleBar Component.
+ * 
+ * Responsibilities:
+ * - Provides a "drag region" for moving the frameless window.
+ * - Handles native window lifecycle events (minimize, maximize, close) via IPC.
+ * - Displays application branding.
+ */
 export function TitleBar() {
     const appWindow = getCurrentWindow();
 
