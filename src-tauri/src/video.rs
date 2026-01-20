@@ -127,7 +127,7 @@ pub async fn add_video_download(
     }
 
     let resolved_path = resolve_download_path(&app, &db_state.path, &adjusted_filepath, output_folder);
-    let final_path = ensure_unique_path(resolved_path);
+    let final_path = ensure_unique_path(&db_state.path, resolved_path);
 
     // Extract the final unique filename from the path
     let final_filename = std::path::Path::new(&final_path)

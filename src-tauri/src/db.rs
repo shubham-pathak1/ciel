@@ -238,6 +238,29 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
     Ok(())
 }
 
+fn row_to_download(row: &rusqlite::Row) -> SqliteResult<Download> {
+    Ok(Download {
+        id: row.get(0)?,
+        url: row.get(1)?,
+        filename: row.get(2)?,
+        filepath: row.get(3)?,
+        size: row.get(4)?,
+        downloaded: row.get(5)?,
+        status: DownloadStatus::from_str(&row.get::<_, String>(6)?),
+        protocol: DownloadProtocol::from_str(&row.get::<_, String>(7)?),
+        speed: row.get(8)?,
+        connections: row.get(9)?,
+        created_at: row.get(10)?,
+        completed_at: row.get(11)?,
+        error_message: row.get(12)?,
+        info_hash: row.get(13)?,
+        metadata: row.get(14)?,
+        user_agent: row.get(15)?,
+        cookies: row.get(16)?,
+        category: row.get(17)?,
+    })
+}
+
 /// Get all downloads from database
 pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     let conn = Connection::open(db_path)?;
@@ -248,28 +271,7 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
     )?;
 
     let downloads = stmt
-        .query_map([], |row| {
-            Ok(Download {
-                id: row.get(0)?,
-                url: row.get(1)?,
-                filename: row.get(2)?,
-                filepath: row.get(3)?,
-                size: row.get(4)?,
-                downloaded: row.get(5)?,
-                status: DownloadStatus::from_str(&row.get::<_, String>(6)?),
-                protocol: DownloadProtocol::from_str(&row.get::<_, String>(7)?),
-                speed: row.get(8)?,
-                connections: row.get(9)?,
-                created_at: row.get(10)?,
-                completed_at: row.get(11)?,
-                error_message: row.get(12)?,
-                info_hash: row.get(13)?,
-                metadata: row.get(14)?,
-                user_agent: row.get(15)?,
-                cookies: row.get(16)?,
-                category: row.get(17)?,
-            })
-        })?
+        .query_map([], |row| row_to_download(row))?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(downloads)
@@ -286,28 +288,7 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
     )?;
 
     let downloads = stmt
-        .query_map([], |row| {
-            Ok(Download {
-                id: row.get(0)?,
-                url: row.get(1)?,
-                filename: row.get(2)?,
-                filepath: row.get(3)?,
-                size: row.get(4)?,
-                downloaded: row.get(5)?,
-                status: DownloadStatus::from_str(&row.get::<_, String>(6)?),
-                protocol: DownloadProtocol::from_str(&row.get::<_, String>(7)?),
-                speed: row.get(8)?,
-                connections: row.get(9)?,
-                created_at: row.get(10)?,
-                completed_at: row.get(11)?,
-                error_message: row.get(12)?,
-                info_hash: row.get(13)?,
-                metadata: row.get(14)?,
-                user_agent: row.get(15)?,
-                cookies: row.get(16)?,
-                category: row.get(17)?,
-            })
-        })?
+        .query_map([], |row| row_to_download(row))?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(downloads)
@@ -409,6 +390,26 @@ pub fn set_setting<P: AsRef<Path>>(db_path: P, key: &str, value: &str) -> Sqlite
         (key, value),
     )?;
     Ok(())
+}
+
+/// Check if a filepath already exists in the downloads table
+pub fn find_download_by_url<P: AsRef<Path>>(db_path: P, url: &str) -> SqliteResult<Option<Download>> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category FROM downloads WHERE url = ?1")?;
+    
+    let mut rows = stmt.query([url])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row_to_download(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn check_filepath_exists<P: AsRef<Path>>(db_path: P, filepath: &str) -> SqliteResult<bool> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM downloads WHERE filepath = ?1")?;
+    let count: i64 = stmt.query_row([filepath], |row| row.get(0))?;
+    Ok(count > 0)
 }
 
 /// Chunks management

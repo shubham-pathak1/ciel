@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
-use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
+use hex;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TorrentFile {
@@ -27,14 +27,23 @@ pub struct TorrentManager {
 
 impl TorrentManager {
     pub async fn new(_force_encryption: bool) -> Result<Self, String> {
-        let download_dir = PathBuf::from("./downloads");
-        if !download_dir.exists() {
-            std::fs::create_dir_all(&download_dir).ok();
+        // Use a temporary session directory that gets cleared on startup.
+        // This prevents stale session state from causing "ghost" torrents.
+        // Actual downloads go to user-specified output_folder per torrent.
+        let session_dir = std::env::temp_dir().join("ciel_torrent_session");
+        
+        if !session_dir.exists() {
+            std::fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
         }
         
-        let options = librqbit::SessionOptions::default();
+        let options = librqbit::SessionOptions {
+            disable_dht: false,
+            disable_dht_persistence: true,  // Don't persist DHT state
+            persistence: None,              // Don't persist torrent state
+            ..Default::default()
+        };
         
-        match Session::new_with_opts(download_dir, options).await {
+        match Session::new_with_opts(session_dir, options).await {
             Ok(session) => Ok(Self {
                 session: Some(session),
                 active_torrents: Arc::new(Mutex::new(HashMap::new())),
@@ -52,13 +61,33 @@ impl TorrentManager {
     pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active (port conflict or initialization error)")?;
         
+        // PROACTIVE GHOST CLEANUP: Delete any existing torrent with the same info hash before adding.
+        // This ensures we start fresh even if librqbit has persisted session state.
+        if let Some(magnet_hash) = Self::extract_info_hash_from_magnet(&magnet) {
+            let hash_to_delete = session.with_torrents(|iter| {
+                for (_id, handle) in iter {
+                    let h_hex = hex::encode(handle.info_hash().0).to_lowercase();
+                    // Magnet might use hex (40 chars) or base32 (32 chars). Check hex match.
+                    if h_hex == magnet_hash {
+                        return Some(handle.info_hash());
+                    }
+                }
+                None
+            });
+
+            if let Some(info_hash) = hash_to_delete {
+                // Delete the ghost, keeping files (delete_files = false)
+                let _ = session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await;
+            }
+        }
+        
         let options = librqbit::AddTorrentOptions {
-            only_files: indices,
+            only_files: indices.clone(),
             output_folder: Some(output_folder.clone()),
-            overwrite: true,
+            overwrite: true, // Allow overwriting to prevent "file exists" errors
             ..Default::default()
         };
-        let response = session.add_torrent(AddTorrent::from_url(magnet), Some(options)).await
+        let response = session.add_torrent(AddTorrent::from_url(&magnet), Some(options)).await
             .map_err(|e| e.to_string())?;
         
         let handle = response.into_handle().ok_or("Failed to get torrent handle")?;
@@ -71,7 +100,7 @@ impl TorrentManager {
         let id_clone = id.clone();
 
         let db_path_clone = db_path.clone();
-        let output_folder_clone = output_folder.clone();
+        let _output_folder_clone = output_folder; // Prefixed with _ since unused after refactor
         tokio::spawn(async move {
             let mut name_updated = false;
             let mut last_downloaded = handle.stats().progress_bytes;
@@ -105,34 +134,30 @@ impl TorrentManager {
                     0
                 };
 
-                // 1. Update Filename & Metadata discovery
+                // 1. Update Size & Info Hash on Metadata discovery
+                // NOTE: We do NOT update filename/filepath here - they are already set correctly
+                // by commands.rs with unique paths like "Movie (1).mkv"
                 if !name_updated && stats.total_bytes > 0 {
                     let name_result = handle.with_metadata(|m| m.name.clone());
-                    if let Ok(real_name) = name_result {
+                    if let Ok(_real_name) = name_result {
                         let total_size = stats.total_bytes;
                         
                         // Update DB size
                         let _ = crate::db::update_download_size(&db_path_clone, &id_clone, total_size as i64);
                         
-                        // Update DB filename & filepath
+                        // Update info_hash in DB
                         let db_p = db_path_clone.clone();
                         let id_p = id_clone.clone();
-                        let name_str = real_name.clone().unwrap_or_else(|| "torrent_download".to_string());
-                        let final_filepath = crate::commands::resolve_download_path(&app, &db_p, &name_str, Some(output_folder_clone.clone()));
-                        
+                        let info_hash_hex = hex::encode(handle.info_hash().0);
+
                         tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = rusqlite::Connection::open(db_p) {
                                 let _ = conn.execute(
-                                    "UPDATE downloads SET filename = ?1, filepath = ?2 WHERE id = ?3", 
-                                    (&name_str, final_filepath, id_p)
+                                    "UPDATE downloads SET info_hash = ?1 WHERE id = ?2", 
+                                    (info_hash_hex, id_p)
                                 );
                             }
                         });
-
-                        let _ = app.emit("download-name-updated", serde_json::json!({
-                            "id": id_clone,
-                            "filename": real_name
-                        }));
                         
                         name_updated = true;
                     }
@@ -148,8 +173,36 @@ impl TorrentManager {
                     "connections": connections,
                 }));
 
+                // Persist progress to DB
+                let _ = crate::db::update_download_progress(
+                     &db_path_clone, 
+                     &id_clone, 
+                     stats.progress_bytes as i64, 
+                     speed as i64
+                );
+
                 if stats.finished {
                     let _ = app.emit("download-completed", id_clone.clone());
+                    
+                    // Final DB update: set progress to 100% and status to Completed
+                    let _ = crate::db::update_download_progress(
+                        &db_path_clone, 
+                        &id_clone, 
+                        stats.total_bytes as i64, 
+                        0
+                    );
+                    
+                    // Update status to Completed
+                    let db_p = db_path_clone.clone();
+                    let id_p = id_clone.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Ok(conn) = rusqlite::Connection::open(&db_p) {
+                            let _ = conn.execute(
+                                "UPDATE downloads SET status = 'Completed', completed_at = datetime('now') WHERE id = ?1", 
+                                [&id_p]
+                            );
+                        }
+                    });
                     
                     // Post-Download Actions
                     // We need the full Download record to know the filepath
@@ -227,9 +280,6 @@ impl TorrentManager {
     pub async fn start_selective(&self, id: &str, _indices: Vec<usize>) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         
-        // Since we removed it during analysis, this might not be in active_torrents yet
-        // Wait, start_selective is called AFTER add_torrent in the new flow?
-        // Let's check commands.rs
         let active = self.active_torrents.lock().await;
         if let Some(handle) = active.get(id) {
              session.unpause(handle).await.map_err(|e| e.to_string())?;
@@ -253,5 +303,60 @@ impl TorrentManager {
             session.unpause(handle).await.map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    pub async fn delete_torrent(&self, id: &str) -> Result<(), String> {
+        let session = self.session.as_ref().ok_or("Torrent session is not active")?;
+        
+        let handle_opt = {
+            let mut active = self.active_torrents.lock().await;
+            active.remove(id)
+        };
+
+        if let Some(handle) = handle_opt {
+             let info_hash = handle.info_hash();
+             session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
+                 .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub async fn delete_torrent_by_hash(&self, hash_str: String) -> Result<(), String> {
+        let session = self.session.as_ref().ok_or("Torrent session is not active")?;
+        
+        let hash_to_delete = session.with_torrents(|iter| {
+            for (_id, handle) in iter {
+                let h_hex = hex::encode(handle.info_hash().0);
+                if h_hex.eq_ignore_ascii_case(&hash_str) {
+                    return Some(handle.info_hash());
+                }
+            }
+            None
+        });
+
+        if let Some(info_hash) = hash_to_delete {
+             session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
+                 .map_err(|e| e.to_string())?;
+        }
+        
+        Ok(())
+    }
+
+    /// Extracts the info hash from a magnet URL.
+    /// Magnet format: magnet:?xt=urn:btih:INFOHASH&...
+    fn extract_info_hash_from_magnet(magnet: &str) -> Option<String> {
+        // Find the btih: prefix
+        let magnet_lower = magnet.to_lowercase();
+        if let Some(start) = magnet_lower.find("btih:") {
+            let hash_start = start + 5; // length of "btih:"
+            let hash_part = &magnet_lower[hash_start..];
+            // Hash ends at & or end of string
+            let hash_end = hash_part.find('&').unwrap_or(hash_part.len());
+            let hash = &hash_part[..hash_end];
+            // Return lowercase hex hash (40 chars for hex, 32 for base32)
+            Some(hash.to_string())
+        } else {
+            None
+        }
     }
 }

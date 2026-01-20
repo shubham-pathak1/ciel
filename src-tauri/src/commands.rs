@@ -196,10 +196,14 @@ pub(crate) fn resolve_download_path(app: &tauri::AppHandle, db_path: &str, provi
     absolute_path.to_string_lossy().to_string()
 }
 
-/// Helper to ensure unique filename if file already exists
-pub(crate) fn ensure_unique_path(path_str: String) -> String {
+/// Helper to ensure unique filename if file already exists on disk OR in database
+pub(crate) fn ensure_unique_path(db_path: &str, path_str: String) -> String {
     let path = Path::new(&path_str);
-    if !path.exists() {
+    
+    // Check if it exists on disk OR in the DB
+    let exists_in_db = crate::db::check_filepath_exists(db_path, &path_str).unwrap_or(false);
+    
+    if !path.exists() && !exists_in_db {
         return path_str;
     }
 
@@ -215,8 +219,12 @@ pub(crate) fn ensure_unique_path(path_str: String) -> String {
             format!("{} ({}).{}", stem, counter, extension)
         };
         let new_path = parent.join(new_filename);
-        if !new_path.exists() {
-            return new_path.to_string_lossy().to_string();
+        let new_path_str = new_path.to_string_lossy().to_string();
+        
+        let exists_in_db = crate::db::check_filepath_exists(db_path, &new_path_str).unwrap_or(false);
+        
+        if !new_path.exists() && !exists_in_db {
+            return new_path_str;
         }
         counter += 1;
     }
@@ -378,7 +386,7 @@ pub async fn add_download(
 
     // Finalize resolved path using the potentially updated filename and optional folder override
     let resolved_path = resolve_download_path(&app, &db_state.path, &filename, output_folder);
-    let final_resolved_path = ensure_unique_path(resolved_path);
+    let final_resolved_path = ensure_unique_path(&db_state.path, resolved_path);
 
     // Extract the final unique filename from the path
     let final_filename = Path::new(&final_resolved_path)
@@ -441,7 +449,7 @@ pub async fn add_torrent(
 
     // Finalize resolved path (Smart Duplicate Handling)
     let resolved_path = resolve_download_path(&app, &db_state.path, &filename, output_folder.clone());
-    let final_resolved_path = ensure_unique_path(resolved_path);
+    let final_resolved_path = ensure_unique_path(&db_state.path, resolved_path.clone());
 
     // Extract the final unique filename from the path
     let final_filename = Path::new(&final_resolved_path)
@@ -474,9 +482,22 @@ pub async fn add_torrent(
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
     db::log_event(&db_state.path, &download.id, "created", Some("Torrent download initiated")).ok();
 
-    let base_folder = if let Some(folder) = output_folder {
+    let is_duplicate = resolved_path != final_resolved_path;
+
+    // For torrents, base_folder must always be a DIRECTORY (not a file path)
+    // librqbit will create the torrent's internal file structure inside this folder
+    let base_folder = if is_duplicate {
+        // For duplicates, use the unique path as a folder
+        // BUT strip the extension so it looks like a folder, e.g. "Downloads/Movie (1)"
+        // This isolates the duplicate download in its own folder, guaranteeing no hash collision
+        let path = Path::new(&final_resolved_path);
+        let stem = path.file_stem().unwrap_or(std::ffi::OsStr::new("unknown"));
+        let parent = path.parent().unwrap_or(Path::new("."));
+        parent.join(stem).to_string_lossy().to_string()
+    } else if let Some(folder) = output_folder {
         folder
     } else {
+        // Use the parent directory of the resolved path
         Path::new(&final_resolved_path).parent().unwrap_or(Path::new(".")).to_string_lossy().to_string()
     };
     
@@ -705,9 +726,25 @@ pub async fn get_download_events(
 pub async fn delete_download(
     db_state: State<'_, DbState>,
     manager: State<'_, DownloadManager>,
+    torrent_manager: State<'_, TorrentManager>,
     id: String,
 ) -> Result<(), String> {
-    manager.cancel(&id).await;
+    // Check protocol
+    let downloads = db::get_all_downloads(&db_state.path).map_err(|e| e.to_string())?;
+    if let Some(download) = downloads.iter().find(|d| d.id == id) {
+        if download.protocol == DownloadProtocol::Torrent {
+            // Try standard delete
+            let _ = torrent_manager.delete_torrent(&id).await;
+            
+            // Also force delete by hash if available (catch ghosts)
+            if let Some(hash) = &download.info_hash {
+                let _ = torrent_manager.delete_torrent_by_hash(hash.clone()).await;
+            }
+        } else {
+            manager.cancel(&id).await;
+        }
+    }
+    
     db::delete_download_by_id(&db_state.path, &id).map_err(|e| e.to_string())
 }
 
