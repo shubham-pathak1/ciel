@@ -28,6 +28,7 @@ pub struct TorrentInfo {
 /// 
 /// It wraps a `librqbit` session and maintains a mapping of active
 /// download handles to facilitate real-time monitoring and control.
+#[derive(Clone)]
 pub struct TorrentManager {
     /// The underlying BitTorrent session.
     session: Option<Arc<Session>>,
@@ -40,19 +41,14 @@ impl TorrentManager {
     /// 
     /// Note: `persistence` is disabled to ensure that Ciel maintains total control
     /// over the download list via its own SQLite database.
-    pub async fn new(_force_encryption: bool) -> Result<Self, String> {
-        // Use a temporary session directory that gets cleared on startup.
-        // This prevents stale session state from causing "ghost" torrents.
-        // Actual downloads go to user-specified output_folder per torrent.
-        let session_dir = std::env::temp_dir().join("ciel_torrent_session");
-        
+    pub async fn new(session_dir: std::path::PathBuf, _force_encryption: bool) -> Result<Self, String> {
         if !session_dir.exists() {
             std::fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
         }
         
         let options = librqbit::SessionOptions {
             disable_dht: false,
-            disable_dht_persistence: true,  // Don't persist DHT state
+            disable_dht_persistence: false, // Enable DHT persistence for faster startups
             persistence: None,              // Don't persist torrent state
             ..Default::default()
         };
@@ -73,33 +69,21 @@ impl TorrentManager {
     }
 
     /// Adds a new magnet link or torrent file to the active session.
-    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>) -> Result<(), String> {
+    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>, total_size: u64, is_resume: bool) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active (port conflict or initialization error)")?;
         
         // PROACTIVE GHOST CLEANUP: Delete any existing torrent with the same info hash before adding.
         // This ensures we start fresh even if librqbit has persisted session state.
         if let Some(magnet_hash) = Self::extract_info_hash_from_magnet(&magnet) {
-            let hash_to_delete = session.with_torrents(|iter| {
-                for (_id, handle) in iter {
-                    let h_hex = hex::encode(handle.info_hash().0).to_lowercase();
-                    // Magnet might use hex (40 chars) or base32 (32 chars). Check hex match.
-                    if h_hex == magnet_hash {
-                        return Some(handle.info_hash());
-                    }
-                }
-                None
-            });
-
-            if let Some(info_hash) = hash_to_delete {
-                // Delete the ghost, keeping files (delete_files = false)
-                let _ = session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await;
-            }
+            // Force a deep purge by hash before adding
+            println!("Proactive cleanup for ghost: {}", magnet_hash);
+            let _ = self.delete_torrent_by_hash(magnet_hash.clone(), false).await;
         }
         
         let options = librqbit::AddTorrentOptions {
             only_files: indices.clone(),
             output_folder: Some(output_folder.clone()),
-            overwrite: true, // Allow overwriting to prevent "file exists" errors
+            overwrite: false, // Prevent overwriting existing files
             ..Default::default()
         };
         let response = session.add_torrent(AddTorrent::from_url(&magnet), Some(options)).await
@@ -112,39 +96,94 @@ impl TorrentManager {
             active.insert(id.clone(), handle.clone());
         }
 
+        // Store indices in metadata for resumption support
+        if let Some(idx) = &indices {
+            let db_p = db_path.clone();
+            let id_p = id.clone();
+            let meta_json = serde_json::json!({ "indices": idx }).to_string();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(conn) = crate::db::open_db(db_p) {
+                    let _ = conn.execute(
+                        "UPDATE downloads SET metadata = ?1 WHERE id = ?2",
+                        (meta_json, id_p)
+                    );
+                }
+            });
+        }
+
         let id_clone = id.clone();
 
         let db_path_clone = db_path.clone();
         let _output_folder_clone = output_folder; // Prefixed with _ since unused after refactor
-        tokio::spawn(async move {
-            let mut name_updated = false;
-            let mut last_downloaded = handle.stats().progress_bytes;
-            let mut last_time = std::time::Instant::now();
+            let active_torrents = self.active_torrents.clone();
+            tokio::spawn(async move {
+                let mut name_updated = false;
+                let mut last_downloaded = handle.stats().progress_bytes;
+                let mut last_time = std::time::Instant::now();
+                let mut speed_u64 = 0u64;
+                let mut smoothed_speed = 0.0f64;
+                let mut paused_counter = 0u8; // Hysteresis counter for Paused state
+                let mut last_resume_time = std::time::Instant::now();
+                let mut was_live = false;
+                let completion_handled = false;
 
-            loop {
+                // First immediate emission to clear UI "Paused" state
                 let stats = handle.stats();
+                let connections = stats.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0) as u64;
+                let _ = app.emit("download-progress", serde_json::json!({
+                    "id": id_clone,
+                    "total": if stats.total_bytes > 0 { stats.total_bytes } else { total_size },
+                    "downloaded": stats.progress_bytes,
+                    "speed": 0,
+                    "eta": 0,
+                    "connections": connections,
+                    "status_text": Some(if is_resume { "Resuming..." } else { "Initializing..." }),
+                }));
+
+                loop {
+                    // CANCELLATION CHECK: If not in active_torrents anymore, exit loop
+                    {
+                        let active = active_torrents.lock().await;
+                        if !active.contains_key(&id_clone) {
+                            break;
+                        }
+                    }
+
+                    let stats = handle.stats();
+                let connections = stats.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0) as u64;
                 
-                // Calculate speed manually for 100% accuracy
+                // Calculate speed manually
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(last_time).as_secs_f64();
                 let downloaded_now = stats.progress_bytes;
                 
-                let mut speed = 0;
-                if elapsed > 0.5 {
+                if elapsed >= 0.5 {
                     let diff = downloaded_now.saturating_sub(last_downloaded);
-                    speed = (diff as f64 / elapsed) as u64;
+                    let mut current_speed = diff as f64 / elapsed;
+                    
+                    // Mitigation: Ignore speed spikes during initial verification if no peers are connected
+                    // We use last_resume_time to ensure this works even after unpause.
+                    if connections == 0 && last_resume_time.elapsed().as_secs() < 10 && current_speed > 5_000_000.0 {
+                        current_speed = 0.0;
+                    }
+
+                    // Faster alpha (0.7) for first 5 seconds after resume to ramp up, then 0.3 for stability
+                    let alpha = if last_resume_time.elapsed().as_secs() < 5 { 0.7 } else { 0.3 };
+                    
+                    if smoothed_speed == 0.0 && current_speed > 0.0 {
+                        smoothed_speed = current_speed;
+                    } else {
+                        smoothed_speed = smoothed_speed * (1.0 - alpha) + current_speed * alpha;
+                    }
+
+                    speed_u64 = smoothed_speed as u64;
                     last_downloaded = downloaded_now;
                     last_time = now;
-                } else {
-                    // During very short intervals, keep the last known speed if available?
-                    // For simplicity, we'll just wait for the next iteration.
                 }
 
-                let connections = stats.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0) as u64;
-                
                 // Calculate ETA
-                let eta = if speed > 0 {
-                    stats.total_bytes.saturating_sub(stats.progress_bytes) / speed
+                let eta = if speed_u64 > 0 {
+                    stats.total_bytes.saturating_sub(stats.progress_bytes) / speed_u64
                 } else {
                     0
                 };
@@ -166,7 +205,7 @@ impl TorrentManager {
                         let info_hash_hex = hex::encode(handle.info_hash().0);
 
                         tokio::task::spawn_blocking(move || {
-                            if let Ok(conn) = rusqlite::Connection::open(db_p) {
+                            if let Ok(conn) = crate::db::open_db(db_p) {
                                 let _ = conn.execute(
                                     "UPDATE downloads SET info_hash = ?1 WHERE id = ?2", 
                                     (info_hash_hex, id_p)
@@ -178,46 +217,126 @@ impl TorrentManager {
                     }
                 }
 
-                // Emit progress
-                let _ = app.emit("download-progress", serde_json::json!({
-                    "id": id_clone,
-                    "total": stats.total_bytes,
-                    "downloaded": stats.progress_bytes,
-                    "speed": speed,
-                    "eta": eta,
-                    "connections": connections,
-                }));
-
                 // Persist progress to DB
                 let _ = crate::db::update_download_progress(
                      &db_path_clone, 
                      &id_clone, 
                      stats.progress_bytes as i64, 
-                     speed as i64
+                     speed_u64 as i64
                 );
 
-                if stats.finished {
-                    let _ = app.emit("download-completed", id_clone.clone());
-                    
-                    // Final DB update: set progress to 100% and status to Completed
-                    let _ = crate::db::update_download_progress(
-                        &db_path_clone, 
-                        &id_clone, 
-                        stats.total_bytes as i64, 
-                        0
-                    );
-                    
-                    // Update status to Completed
+                if !stats.finished {
+                     // Emit progress only if NOT finished, to prevent race with completion event
+                     let status_text = if stats.total_bytes == 0 { 
+                        Some(format!("Fetching Metadata... ({} peers)", connections)) 
+                    } else if stats.live.is_none() {
+                         if was_live {
+                             // Force immediate Paused if we were just live (user manually paused)
+                             paused_counter = 50;
+                         } else {
+                             paused_counter = paused_counter.saturating_add(1);
+                         }
+                         
+                         // Reset speed baselines while paused so resumption starts fresh
+                         last_downloaded = stats.progress_bytes;
+                         last_time = std::time::Instant::now();
+                         // Show "Paused" immediately if it was live before (manual user action)
+                         // OR if we've been paused for a significant number of samples (hysteresis).
+                         let is_explicit_pause = was_live || paused_counter >= 15;
+                         
+                         if is_explicit_pause {
+                             // CRITICAL: Double-check with DB before declaring "Paused"
+                             // If the DB says "Downloading", we are actually Resuming (connecting).
+                             let db_path_check = db_path_clone.clone();
+                             let id_check = id_clone.clone();
+                             
+                             // We use spawn_blocking to check DB without blocking the async runtime, 
+                             // but we need the result here. Since we are in an async loop, 
+                             // we can't easily await a blocking task without reorganizing.
+                             // However, checking the DB every second is fine.
+                             let is_db_paused = std::thread::spawn(move || {
+                                 if let Ok(conn) = crate::db::open_db(&db_path_check) {
+                                     if let Ok(status) = crate::db::get_download_status(&conn, &id_check) {
+                                         return status == crate::db::DownloadStatus::Paused;
+                                     }
+                                 }
+                                 false // Default to false (Not Paused) if DB read fails
+                             }).join().unwrap_or(false); // Default to false if thread panic
+
+                             if is_db_paused {
+                                 was_live = false; // Only clear was_live once confirmed Paused
+                                 Some("Paused".to_string())
+                             } else {
+                                 // DB says Downloading -> Reset counters and show Resuming
+                                 paused_counter = 0;
+                                 was_live = false; 
+                                 Some("Resuming...".to_string())
+                             }
+                         } else {
+                             // Stay in Initializing/Resuming for at least 10 seconds during engine startup
+                             Some(if is_resume { "Resuming..." } else { "Initializing..." }.to_string())
+                         }
+                    } else { 
+                        // Engine is live
+                        if paused_counter >= 1 || !was_live {
+                             // We just transitioned from paused to live
+                             last_resume_time = std::time::Instant::now();
+                        }
+                        paused_counter = 0; // Reset counter when live
+                        was_live = true;
+
+                        if speed_u64 == 0 {
+                             if connections == 0 {
+                                 Some("Connecting...".to_string())
+                             } else {
+                                 Some(format!("Downloading ({} peers)", connections))
+                             }
+                        } else { 
+                            Some(format!("Downloading ({} peers)", connections))
+                        }
+                    };
+
+                    let _ = app.emit("download-progress", serde_json::json!({
+                        "id": id_clone,
+                        "total": stats.total_bytes,
+                        "downloaded": stats.progress_bytes,
+                        "speed": speed_u64,
+                        "eta": eta,
+                        "connections": connections,
+                        "status_text": status_text,
+                    }));
+                }
+
+                if (stats.finished || (stats.total_bytes > 0 && stats.progress_bytes >= stats.total_bytes)) && !completion_handled {
+                    // 1. Update status to Completed in DB (Block until done to prevent race with frontend)
                     let db_p = db_path_clone.clone();
                     let id_p = id_clone.clone();
-                    tokio::task::spawn_blocking(move || {
-                        if let Ok(conn) = rusqlite::Connection::open(&db_p) {
-                            let _ = conn.execute(
-                                "UPDATE downloads SET status = 'Completed', completed_at = datetime('now') WHERE id = ?1", 
+                    let total_bytes_final = stats.total_bytes; // Capture explicit current size
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(conn) = crate::db::open_db(&db_p) {
+                            if let Err(e) = conn.execute(
+                                "UPDATE downloads SET status = 'completed', completed_at = datetime('now') WHERE id = ?1", 
                                 [&id_p]
+                            ) {
+                                eprintln!("CRITICAL DB ERROR: Failed to mark as completed: {}", e);
+                            }
+                            
+                            // Also ensure progress is capped at 100%
+                             let _ = crate::db::update_download_progress(
+                                &db_p, 
+                                &id_p, 
+                                total_bytes_final as i64, 
+                                0
                             );
+                        } else {
+                            eprintln!("CRITICAL DB ERROR: Failed to open DB for completion");
                         }
-                    });
+                    }).await;
+
+                    // 2. Emit completion event only AFTER DB is updated
+                    let _ = app.emit("download-completed", id_clone.clone());
+                    
+                    // completion_handled = true; // Unused as we break immediately
                     
                     // Post-Download Actions
                     // We need the full Download record to know the filepath
@@ -229,7 +348,7 @@ impl TorrentManager {
                     break;
                 }
                 
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }
         });
 
@@ -308,28 +427,50 @@ impl TorrentManager {
     }
 
     /// Pauses an active torrent in the `librqbit` session.
+    /// Pauses an active torrent in the `librqbit` session.
     pub async fn pause_torrent(&self, id: &str) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         let active = self.active_torrents.lock().await;
         if let Some(handle) = active.get(id) {
-            session.pause(handle).await.map_err(|e| e.to_string())?;
+            match session.pause(handle).await {
+                Ok(_) => {},
+                Err(e) => {
+                    let msg = e.to_string();
+                    // If it's already paused, we consider that a success
+                    if !msg.contains("already paused") {
+                        return Err(msg);
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     /// Resumes a paused torrent in the `librqbit` session.
+    /// Resumes a paused torrent in the `librqbit` session.
     pub async fn resume_torrent(&self, id: &str) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         let active = self.active_torrents.lock().await;
         if let Some(handle) = active.get(id) {
-            session.unpause(handle).await.map_err(|e| e.to_string())?;
+            match session.unpause(handle).await {
+                Ok(_) => {},
+                Err(e) => {
+                    let msg = e.to_string();
+                    // If it's already running, we consider that a success
+                    if !msg.contains("not paused") && !msg.contains("already running") {
+                        return Err(msg);
+                    }
+                }
+            }
+            return Ok(());
         }
-        Ok(())
+        Err("Torrent not in active session".to_string())
     }
 
     /// Deletes a torrent and its metadata from the session. 
-    /// Note: Does NOT delete the actual downloaded files from disk.
-    pub async fn delete_torrent(&self, id: &str) -> Result<(), String> {
+    /// If delete_files is true, also removes the data from disk.
+    /// target_path is an optional manual override to ensure files are gone even if engine hangs.
+    pub async fn delete_torrent(&self, id: &str, delete_files: bool, target_path: Option<String>) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         
         let handle_opt = {
@@ -339,15 +480,50 @@ impl TorrentManager {
 
         if let Some(handle) = handle_opt {
              let info_hash = handle.info_hash();
-             session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
-                 .map_err(|e| e.to_string())?;
+             // Delete standard
+             let _ = session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), delete_files).await;
+             
+              // FORCED PURGE: Ensure it's gone from session entirely
+              let hash_to_purge = session.with_torrents(|iter| {
+                  for (_id, h) in iter {
+                      if h.info_hash() == info_hash {
+                          return Some(h.info_hash());
+                      }
+                  }
+                  None
+              });
+              if let Some(h) = hash_to_purge {
+                  let _ = session.delete(librqbit::api::TorrentIdOrHash::Hash(h), delete_files).await;
+              }
         }
+
+        // 4. MANUAL CLEANUP FALLBACK (Windows resilience)
+        if delete_files {
+            if let Some(path) = target_path {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                let path_obj = std::path::Path::new(&path);
+                if path_obj.exists() {
+                    println!("Torrent engine residue found at {}, forcing manual removal.", path);
+                    if path_obj.is_dir() {
+                        let _ = std::fs::remove_dir_all(path_obj);
+                    } else {
+                        let _ = std::fs::remove_file(path_obj);
+                    }
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Checks if a torrent with the given ID is currently active in the manager.
+    pub async fn is_active(&self, id: &str) -> bool {
+        self.active_torrents.lock().await.contains_key(id)
     }
 
     /// Forcefully removes a torrent from the session by its info hash.
     /// Useful for cleaning up "zombie" or "ghost" torrents.
-    pub async fn delete_torrent_by_hash(&self, hash_str: String) -> Result<(), String> {
+    pub async fn delete_torrent_by_hash(&self, hash_str: String, delete_files: bool) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active")?;
         
         let hash_to_delete = session.with_torrents(|iter| {
@@ -361,8 +537,23 @@ impl TorrentManager {
         });
 
         if let Some(info_hash) = hash_to_delete {
-             session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false).await
-                 .map_err(|e| e.to_string())?;
+             let _ = session.delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), delete_files).await;
+             
+             // POSITIVE CONFIRMATION: Wait for engine to drop it
+             let mut attempts = 0;
+             while attempts < 20 {
+                 let still_there = session.with_torrents(|iter| {
+                     for (_id, h) in iter {
+                         if h.info_hash() == info_hash {
+                             return true;
+                         }
+                     }
+                     false
+                 });
+                 if !still_there { break; }
+                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                 attempts += 1;
+             }
         }
         
         Ok(())
@@ -370,7 +561,12 @@ impl TorrentManager {
 
     /// Helper: Parses a magnet link to extract the unique info hash.
     /// Supports both hex and base32 variants.
-    fn extract_info_hash_from_magnet(magnet: &str) -> Option<String> {
+    pub fn extract_info_hash_from_magnet(magnet: &str) -> Option<String> {
+        // Handle direct hex string (40 chars)
+        if magnet.len() == 40 && magnet.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(magnet.to_lowercase());
+        }
+
         // Find the btih: prefix
         let magnet_lower = magnet.to_lowercase();
         if let Some(start) = magnet_lower.find("btih:") {
@@ -379,8 +575,36 @@ impl TorrentManager {
             // Hash ends at & or end of string
             let hash_end = hash_part.find('&').unwrap_or(hash_part.len());
             let hash = &hash_part[..hash_end];
-            // Return lowercase hex hash (40 chars for hex, 32 for base32)
-            Some(hash.to_string())
+            
+            // Normalize to hex if base32 (32 chars)
+            if hash.len() == 32 {
+                let mut alphabet = [0u8; 128];
+                for (i, &c) in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".as_bytes().iter().enumerate() {
+                    alphabet[c as usize] = i as u8;
+                }
+                
+                let input = hash.to_uppercase();
+                let input_bytes = input.as_bytes();
+                let mut output = Vec::new();
+                let mut buffer = 0u32;
+                let mut bits_left = 0;
+                
+                for &byte in input_bytes {
+                    if (byte as usize) < alphabet.len() {
+                        let val = alphabet[byte as usize] as u32;
+                        buffer = (buffer << 5) | val;
+                        bits_left += 5;
+                        while bits_left >= 8 {
+                            output.push((buffer >> (bits_left - 8)) as u8);
+                            bits_left -= 8;
+                            buffer &= (1 << bits_left) - 1;
+                        }
+                    }
+                }
+                return Some(hex::encode(output).to_lowercase());
+            }
+            
+            Some(hash.to_string().to_lowercase())
         } else {
             None
         }

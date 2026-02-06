@@ -16,6 +16,20 @@ pub struct DbState {
     pub path: String,
 }
 
+/// Centralized database accessor with a busy timeout to prevent contention hangs.
+pub fn open_db<P: AsRef<Path>>(path: P) -> SqliteResult<Connection> {
+    let conn = Connection::open(path)?;
+    // Wait up to 5 seconds if the database is locked by another thread.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    // Enable Foreign Keys to support ON DELETE CASCADE
+    let _ = conn.execute("PRAGMA foreign_keys = ON;", []);
+    // Enable WAL mode to allow concurrent reads and writes
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    // NORMAL synchronous mode is safe with WAL and much faster for sequential updates
+    let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+    Ok(conn)
+}
+
 /// Represents the current lifecycle stage of a download.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -130,7 +144,7 @@ pub struct Download {
 /// 
 /// This is called once during application startup in `lib.rs`.
 pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
-    let conn = Connection::open(path)?;
+    let conn = open_db(path)?;
 
     conn.execute_batch(
         "
@@ -295,7 +309,7 @@ fn row_to_download(row: &rusqlite::Row) -> SqliteResult<Download> {
 
 /// Retrieves all download records from the database, sorted by creation date (newest first).
 pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category
          FROM downloads
@@ -311,7 +325,7 @@ pub fn get_all_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Downloa
 
 /// Retrieves all downloads that have successfully reached the 'completed' status.
 pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category
          FROM downloads
@@ -328,7 +342,7 @@ pub fn get_history<P: AsRef<Path>>(db_path: P) -> SqliteResult<Vec<Download>> {
 
 /// Persists a new download record to the database.
 pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "INSERT INTO downloads (id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
@@ -356,13 +370,23 @@ pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> Sqlit
     Ok(())
 }
 
+/// Retrieves the status of a specific download.
+pub fn get_download_status(conn: &Connection, id: &str) -> SqliteResult<DownloadStatus> {
+    let status_str: String = conn.query_row(
+        "SELECT status FROM downloads WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(DownloadStatus::from_str(&status_str))
+}
+
 /// Updates the status field (e.g., from 'Downloading' to 'Paused') for a specific record.
 pub fn update_download_status<P: AsRef<Path>>(
     db_path: P,
     id: &str,
     status: DownloadStatus,
 ) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "UPDATE downloads SET status = ?1 WHERE id = ?2",
         (status.as_str(), id),
@@ -377,7 +401,7 @@ pub fn update_download_progress<P: AsRef<Path>>(
     downloaded: i64,
     speed: i64,
 ) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "UPDATE downloads SET downloaded = ?1, speed = ?2 WHERE id = ?3",
         (downloaded, speed, id),
@@ -391,7 +415,7 @@ pub fn update_download_size<P: AsRef<Path>>(
     id: &str,
     size: i64,
 ) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "UPDATE downloads SET size = ?1 WHERE id = ?2",
         (size, id),
@@ -399,16 +423,30 @@ pub fn update_download_size<P: AsRef<Path>>(
     Ok(())
 }
 
+/// Updates the filename of a download.
+pub fn update_download_name<P: AsRef<Path>>(
+    db_path: P,
+    id: &str,
+    name: &str,
+) -> SqliteResult<()> {
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "UPDATE downloads SET filename = ?1 WHERE id = ?2",
+        (name, id),
+    )?;
+    Ok(())
+}
+
 /// Removes a download record and its associated chunks/history from the database.
 pub fn delete_download_by_id<P: AsRef<Path>>(db_path: P, id: &str) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute("DELETE FROM downloads WHERE id = ?1", [id])?;
     Ok(())
 }
 
 /// Retrieves a configuration value by its unique key. Returns `None` if not found.
 pub fn get_setting<P: AsRef<Path>>(db_path: P, key: &str) -> SqliteResult<Option<String>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
     let result = stmt.query_row([key], |row| row.get(0)).ok();
     Ok(result)
@@ -416,7 +454,7 @@ pub fn get_setting<P: AsRef<Path>>(db_path: P, key: &str) -> SqliteResult<Option
 
 /// Stores or updates a configuration value in the `settings` table.
 pub fn set_setting<P: AsRef<Path>>(db_path: P, key: &str, value: &str) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
         (key, value),
@@ -427,7 +465,7 @@ pub fn set_setting<P: AsRef<Path>>(db_path: P, key: &str, value: &str) -> Sqlite
 /// Searches for an existing download by its source URL.
 /// Used to prevent redundant transfers or to resume existing ones.
 pub fn find_download_by_url<P: AsRef<Path>>(db_path: P, url: &str) -> SqliteResult<Option<Download>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare("SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category FROM downloads WHERE url = ?1")?;
     
     let mut rows = stmt.query([url])?;
@@ -439,7 +477,7 @@ pub fn find_download_by_url<P: AsRef<Path>>(db_path: P, url: &str) -> SqliteResu
 }
 
 pub fn check_filepath_exists<P: AsRef<Path>>(db_path: P, filepath: &str) -> SqliteResult<bool> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare("SELECT COUNT(*) FROM downloads WHERE filepath = ?1")?;
     let count: i64 = stmt.query_row([filepath], |row| row.get(0))?;
     Ok(count > 0)
@@ -447,7 +485,7 @@ pub fn check_filepath_exists<P: AsRef<Path>>(db_path: P, filepath: &str) -> Sqli
 
 /// Stores a batch of chunk metadata for multi-threaded HTTP downloads.
 pub fn insert_chunks<P: AsRef<Path>>(db_path: P, chunks: Vec<crate::downloader::ChunkRecord>) -> SqliteResult<()> {
-    let mut conn = Connection::open(db_path)?;
+    let mut conn = open_db(db_path)?;
     let tx = conn.transaction()?;
     {
         for chunk in chunks {
@@ -462,7 +500,7 @@ pub fn insert_chunks<P: AsRef<Path>>(db_path: P, chunks: Vec<crate::downloader::
 }
 
 pub fn update_chunk_progress<P: AsRef<Path>>(db_path: P, download_id: &str, start_byte: i64, downloaded: i64) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "UPDATE chunks SET downloaded = ?1 WHERE download_id = ?2 AND start_byte = ?3",
         (downloaded, download_id, start_byte),
@@ -471,7 +509,7 @@ pub fn update_chunk_progress<P: AsRef<Path>>(db_path: P, download_id: &str, star
 }
 
 pub fn get_download_chunks<P: AsRef<Path>>(db_path: P, download_id: &str) -> SqliteResult<Vec<crate::downloader::ChunkRecord>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare("SELECT start_byte, end_byte, downloaded FROM chunks WHERE download_id = ?1")?;
     let chunks = stmt.query_map([download_id], |row| {
         Ok(crate::downloader::ChunkRecord {
@@ -489,7 +527,7 @@ pub fn get_download_chunks<P: AsRef<Path>>(db_path: P, download_id: &str) -> Sql
 pub fn get_all_settings<P: AsRef<Path>>(
     db_path: P,
 ) -> SqliteResult<std::collections::HashMap<String, String>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare("SELECT key, value FROM settings ")?;
     let settings = stmt
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
@@ -504,7 +542,7 @@ pub fn log_event<P: AsRef<Path>>(
     event_type: &str,
     details: Option<&str>,
 ) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO history (download_id, event_type, timestamp, details) VALUES (?1, ?2, ?3, ?4)",
@@ -518,7 +556,7 @@ pub fn get_download_events<P: AsRef<Path>>(
     db_path: P,
     download_id: &str,
 ) -> SqliteResult<Vec<(String, String, Option<String>)>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT event_type, timestamp, details FROM history WHERE download_id = ?1 ORDER BY timestamp DESC "
     )?;
@@ -534,7 +572,7 @@ pub fn get_download_events<P: AsRef<Path>>(
 
 /// Delete all finished (completed or error) downloads
 pub fn delete_finished_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "DELETE FROM downloads WHERE status = 'completed' OR status = 'error'",
         [],

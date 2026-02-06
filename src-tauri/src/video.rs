@@ -221,6 +221,17 @@ pub async fn start_video_download_task(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
 
+    // Immediate Feedback
+    let _ = app.emit("download-progress", serde_json::json!({
+        "id": id.clone(),
+        "total": download.size,
+        "downloaded": 0,
+        "speed": 0,
+        "eta": 0,
+        "connections": 0,
+        "status_text": Some("Initializing..."),
+    }));
+
     tokio::spawn(async move {
         let mut cmd = bin_resolver::resolve_bin(&app_clone, Binary::YtDlp);
         cmd = cmd.arg("-f")
@@ -258,6 +269,8 @@ pub async fn start_video_download_task(
         let mut current_file_max_size: u64 = 0;
         let mut aborted = false;
         let mut status_text: Option<String> = Some("Starting...".to_string());
+        let mut last_speed_bytes: u64 = 0;
+        let mut last_eta_secs: u64 = 0;
 
         while let Some(event) = events.recv().await {
             match event {
@@ -287,8 +300,6 @@ pub async fn start_video_download_task(
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         let mut progress_pct = 0.0;
                         let mut total_size_bytes = 0;
-                        let mut speed_bytes = 0;
-                        let mut eta_secs = 0;
 
                         for (i, part) in parts.iter().enumerate() {
                             if part.contains('%') {
@@ -298,10 +309,10 @@ pub async fn start_video_download_task(
                                 total_size_bytes = parse_size(parts[i+1]);
                             }
                             if *part == "at" && i + 1 < parts.len() {
-                                speed_bytes = parse_size(parts[i+1].replace("/s", "").as_str());
+                                last_speed_bytes = parse_size(parts[i+1].replace("/s", "").as_str());
                             }
                             if *part == "ETA" && i + 1 < parts.len() {
-                                eta_secs = parse_eta(parts[i+1]);
+                                last_eta_secs = parse_eta(parts[i+1]);
                             }
                         }
 
@@ -318,13 +329,13 @@ pub async fn start_video_download_task(
                             "id": id_clone,
                             "total": display_total,
                             "downloaded": total_downloaded_so_far,
-                            "speed": speed_bytes,
-                            "eta": eta_secs,
+                            "speed": last_speed_bytes,
+                            "eta": last_eta_secs,
                             "connections": max_connections,
                             "status_text": status_text,
                         }));
 
-                        let _ = db::update_download_progress(&db_path_clone, &id_clone, total_downloaded_so_far as i64, speed_bytes as i64);
+                        let _ = db::update_download_progress(&db_path_clone, &id_clone, total_downloaded_so_far as i64, last_speed_bytes as i64);
                         if display_total > 0 {
                             let _ = db::update_download_size(&db_path_clone, &id_clone, display_total as i64);
                         }

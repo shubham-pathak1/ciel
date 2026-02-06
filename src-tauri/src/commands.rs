@@ -15,6 +15,7 @@ use tauri_plugin_notification::NotificationExt;
 /// 
 /// It acts as a registry for ongoing transfers, allowing the application
 /// to send cancellation signals to specific download tasks via `mpsc` channels.
+#[derive(Clone)]
 pub struct DownloadManager {
     /// Internal map linking Download IDs to their respective cancellation senders.
     active_downloads: Arc<Mutex<HashMap<String, mpsc::Sender<()>>>>,
@@ -362,57 +363,11 @@ pub async fn add_download(
         .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(16);
     
+    // Streamline: No synchronous sniffing here. 
+    // The Downloader will handle metadata discovery in the background to prevent UI lag.
     let mut filename = filename;
-    
-    // Check if current filename is "suspicious" (no extension, generic, or looks like a hash)
-    let has_ext = filename.contains('.');
-    let is_generic = filename == "download" || filename == "download_file" || filename.is_empty();
-    let looks_like_hash = filename.len() > 15 && !filename.contains(' ') && !has_ext;
-
-    if (is_generic || looks_like_hash || !has_ext) && url.starts_with("http") {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5));
-            
-        if let Some(ref ua) = user_agent {
-            builder = builder.user_agent(ua);
-        } else {
-            builder = builder.user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        }
-
-        if let Some(ref c) = cookies {
-            use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
-            let mut headers = HeaderMap::new();
-            if let Ok(v) = HeaderValue::from_str(c) {
-                headers.insert(COOKIE, v);
-                builder = builder.default_headers(headers);
-            }
-        }
-
-        let client = builder.build().unwrap_or_default();
-            
-        let mut found_name = None;
-        
-        // Try HEAD first
-        if let Ok(res) = client.head(&url).send().await {
-            let name = crate::downloader::extract_filename(&url, res.headers());
-            if name != "download" && name != "download_file" {
-                found_name = Some(name);
-            }
-        }
-        
-        // If HEAD failed or didn't give a good name, try GET with a tiny range
-        if found_name.is_none() {
-            if let Ok(res) = client.get(&url).header("Range", "bytes=0-0").send().await {
-                let name = crate::downloader::extract_filename(&url, res.headers());
-                if name != "download" && name != "download_file" {
-                    found_name = Some(name);
-                }
-            }
-        }
-        
-        if let Some(name) = found_name {
-            filename = name;
-        }
+    if filename.is_empty() {
+        filename = "download_file".to_string();
     }
 
     // Finalize resolved path using the potentially updated filename and optional folder override
@@ -502,7 +457,7 @@ pub async fn add_torrent(
         filepath: final_resolved_path.clone(),
         size: 0,
         downloaded: 0,
-        status: DownloadStatus::Queued,
+        status: DownloadStatus::Downloading,
         protocol: DownloadProtocol::Torrent,
         speed: 0,
         connections: 0,
@@ -538,7 +493,7 @@ pub async fn add_torrent(
         Path::new(&final_resolved_path).parent().unwrap_or(Path::new(".")).to_string_lossy().to_string()
     };
     
-    torrent_manager.add_magnet(app, id.clone(), url, base_folder, db_state.path.clone(), indices).await?;
+    torrent_manager.add_magnet(app, id.clone(), url, base_folder, db_state.path.clone(), indices, 0, false).await?;
 
     Ok(download)
 }
@@ -689,6 +644,7 @@ async fn start_download_task(
 /// directly with the `librqbit` session.
 #[tauri::command]
 pub async fn pause_download(
+    app: AppHandle,
     db_state: State<'_, DbState>,
     manager: State<'_, DownloadManager>,
     torrent_manager: State<'_, TorrentManager>,
@@ -705,7 +661,23 @@ pub async fn pause_download(
 
     db::log_event(&db_state.path, &id, "paused", None).ok();
     db::update_download_status(&db_state.path, &id, DownloadStatus::Paused)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    
+    // Immediate UI Feedback
+    // We construct a partial object that the frontend will merge/handle
+    // The frontend mainly looks at 'status_text' for logic overrides we added
+    use tauri::Emitter;
+    let _ = app.emit("download-progress", serde_json::json!({
+        "id": id,
+        "total": download.size,
+        "downloaded": download.downloaded,
+        "speed": 0,
+        "eta": 0,
+        "connections": 0,
+        "status_text": "Paused",
+    }));
+
+    Ok(())
 }
 
 /// Bridge: Resumes a previously paused transfer.
@@ -733,8 +705,15 @@ pub async fn resume_download(
         return Err("Download already completed".to_string());
     }
 
-    if manager.is_active(&id).await {
-        return Err("Download is already active".to_string());
+    // Check if truly active in its respective manager
+    let is_active = match download.protocol {
+        DownloadProtocol::Torrent => torrent_manager.is_active(&id).await,
+        _ => manager.is_active(&id).await,
+    };
+
+    if is_active && download.status == DownloadStatus::Downloading {
+         // If it's active and status is downloading, it might already be running.
+         // But we allow resuming a paused torrent.
     }
 
     db::update_download_status(&db_state.path, &id, DownloadStatus::Downloading).map_err(|e| e.to_string())?;
@@ -742,7 +721,34 @@ pub async fn resume_download(
 
     match download.protocol {
         DownloadProtocol::Torrent => {
-            torrent_manager.resume_torrent(&id).await?;
+            // Try to resume existing session
+            if let Err(_) = torrent_manager.resume_torrent(&id).await {
+                // If it wasn't in the active session map (e.g. app restart), re-add it.
+                // It will automatically verify existing files and resume.
+                let output_folder = std::path::Path::new(&download.filepath).parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                
+                // Extract indices from metadata if present
+                let indices = if let Some(meta_str) = &download.metadata {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(meta_str) {
+                         json["indices"].as_array().map(|arr| {
+                             arr.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect::<Vec<usize>>()
+                         })
+                    } else { None }
+                } else { None };
+
+                torrent_manager.add_magnet(
+                    app, 
+                    id, 
+                    download.url, 
+                    output_folder, 
+                    db_state.path.clone(), 
+                    indices,
+                    download.size as u64,
+                    true
+                ).await?;
+            }
         }
         DownloadProtocol::Video => {
             crate::video::start_video_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
@@ -777,24 +783,54 @@ pub async fn delete_download(
     manager: State<'_, DownloadManager>,
     torrent_manager: State<'_, TorrentManager>,
     id: String,
+    delete_files: bool,
 ) -> Result<(), String> {
-    // Check protocol
+    println!("Deleting download ID: {}, delete_files: {}. DB Path: {}", id, delete_files, &db_state.path);
+    
+    // 1. Get record first to know protocol and hash
     let downloads = db::get_all_downloads(&db_state.path).map_err(|e| e.to_string())?;
-    if let Some(download) = downloads.iter().find(|d| d.id == id) {
-        if download.protocol == DownloadProtocol::Torrent {
-            // Try standard delete
-            let _ = torrent_manager.delete_torrent(&id).await;
-            
-            // Also force delete by hash if available (catch ghosts)
-            if let Some(hash) = &download.info_hash {
-                let _ = torrent_manager.delete_torrent_by_hash(hash.clone()).await;
+    let download_opt = downloads.into_iter().find(|d| d.id == id);
+
+    if let Some(download) = download_opt {
+        println!("Found record: {}. Protocol: {:?}", id, download.protocol);
+        
+        // 2. Clear from DB FIRST to ensure it doesn't "ghost" back into the UI.
+        // This makes the deletion feel instant to the user.
+        db::delete_download_by_id(&db_state.path, &id).map_err(|e| {
+            println!("CRITICAL: Failed to delete DB record for {}: {}", id, e);
+            e.to_string()
+        })?;
+        println!("DB record removed successfully for ID: {}", id);
+
+        // 3. Cleanup Engine (Fire-and-forget in a background task)
+        // This prevents hangs in the engine (e.g. searching for missing files) from blocking the UI.
+        let tm = torrent_manager.inner().clone();
+        let m = manager.inner().clone();
+        
+        tokio::spawn(async move {
+            if download.protocol == DownloadProtocol::Torrent {
+                println!("Background engine cleanup for torrent: {}", id);
+                let _ = tm.delete_torrent(&id, delete_files, Some(download.filepath.clone())).await;
+                if let Some(hash) = download.info_hash {
+                    let _ = tm.delete_torrent_by_hash(hash, delete_files).await;
+                } else if let Some(hash) = TorrentManager::extract_info_hash_from_magnet(&download.url) {
+                    let _ = tm.delete_torrent_by_hash(hash, delete_files).await;
+                }
+            } else {
+                println!("Background engine cleanup for HTTP: {}", id);
+                m.cancel(&id).await;
             }
-        } else {
-            manager.cancel(&id).await;
-        }
+            println!("Background cleanup finished for ID: {}", id);
+        });
+    } else {
+        println!("No DB record found for {}, attempting blind engine purge.", id);
+        let tm = torrent_manager.inner().clone();
+        tokio::spawn(async move {
+            let _ = tm.delete_torrent(&id, delete_files, None).await;
+       });
     }
     
-    db::delete_download_by_id(&db_state.path, &id).map_err(|e| e.to_string())
+    Ok(())
 }
 
 /// Bridge: Fetches the entire configuration map.
@@ -906,16 +942,9 @@ pub fn show_in_folder_internal(app: AppHandle, db_path: &str, path: String) -> R
     Ok(())
 }
 
-impl Clone for DownloadManager {
-    fn clone(&self) -> Self {
-        Self {
-            active_downloads: self.active_downloads.clone(),
-        }
-    }
-}
-
 /// Clear finished downloads
 #[tauri::command]
 pub fn clear_finished(db_state: State<DbState>) -> Result<(), String> {
     db::delete_finished_downloads(&db_state.path).map_err(|e| e.to_string())
 }
+

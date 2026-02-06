@@ -53,9 +53,10 @@ export const History: React.FC = () => {
     const handleDelete = async (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
         try {
-            await invoke("delete_download", { id });
+            await invoke("delete_download", { id, deleteFiles: false });
             setHistory(prev => prev.filter(item => item.id !== id));
         } catch (err) {
+            alert(`DEBUG [History]: delete_download error: ${err}`);
             console.error("Failed to delete history item:", err);
         }
     };

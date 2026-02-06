@@ -472,7 +472,7 @@ export function Settings() {
                         </div>
 
                         <p className="text-sm text-text-secondary leading-relaxed max-w-md mx-auto">
-                            "Built for speed!"
+                            Built for speed!
                         </p>
 
                         <div className="grid grid-cols-2 gap-4 max-w-sm mx-auto">
@@ -504,7 +504,7 @@ export function Settings() {
                                 Visit Website
                             </a>
                         </div>
-                    </div>
+                    </div >
                 );
             default:
                 return (

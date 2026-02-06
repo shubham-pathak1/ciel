@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { DownloadQueue } from "./components/DownloadQueue";
@@ -7,6 +7,7 @@ import { History } from "./components/History";
 import { motion, AnimatePresence } from "framer-motion";
 
 type View = "downloads" | "active" | "completed" | "settings" | "Video" | "Audio" | "Compressed" | "Software" | "Documents" | "Other";
+
 
 function App() {
     const [currentView, setCurrentView] = useState<View>("downloads");

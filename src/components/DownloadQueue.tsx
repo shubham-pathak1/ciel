@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useEffect, useCallback, memo } from "react";
-import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Video as VideoIcon, Database as DatabaseIcon } from "lucide-react";
+import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Video as VideoIcon, Database as DatabaseIcon, Check } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
@@ -149,6 +149,9 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
             setDownloads((prev) =>
                 prev.map((d) => {
                     if (d.id === progress.id) {
+                        // Prevent overwriting completed status with late progress events
+                        if (d.status === "completed") return d;
+
                         return {
                             ...d,
                             downloaded: progress.downloaded,
@@ -156,7 +159,7 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
                             speed: progress.speed,
                             eta: progress.eta,
                             connections: progress.connections,
-                            status: "downloading",
+                            status: progress.status_text === "Paused" ? "paused" : "downloading",
                             status_text: progress.status_text,
                         };
                     }
@@ -200,20 +203,23 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
         return true;
     });
 
+    // Count only truly active downloads for the badge (not completed or errored)
+    const activeCount = downloads.filter(d => d.status === "downloading" || d.status === "queued" || d.status === "paused").length;
+
     return (
-        <div className="flex flex-col h-full bg-brand-primary/50 relative overflow-hidden">
+        <div className="flex flex-col h-full bg-brand-primary relative overflow-hidden">
             <div className="p-8 pb-4 flex items-center justify-between relative z-10">
                 <div className="flex flex-col gap-1">
                     <h1 className="text-2xl font-bold text-text-primary tracking-tight flex items-center gap-2">
                         {category ? `${category} Downloads` : filter === "active" ? "Active Downloads" : "All Downloads"}
-                        {filteredDownloads.length > 0 && (
-                            <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-brand-tertiary/20 text-brand-secondary">
-                                {filteredDownloads.length}
+                        {activeCount > 0 && (
+                            <span className="w-4 h-4 flex items-center justify-center rounded-full bg-white text-black shadow-sm text-[9px] font-bold">
+                                {activeCount}
                             </span>
                         )}
                     </h1>
                     <p className="text-sm text-text-tertiary">
-                        {category ? `Organized collection of ${category.toLowerCase()} files` : "Manage and track your download tasks in real-time"}
+                        {category ? `Organized collection of ${category.toLowerCase()} files` : "Manage and track all your download tasks"}
                     </p>
                 </div>
 
@@ -246,6 +252,7 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
                                 key={download.id}
                                 download={download}
                                 onRefresh={handleRefreshList}
+                                setDownloads={setDownloads}
                             />
                         ))}
                     </AnimatePresence>
@@ -289,10 +296,114 @@ function EmptyState({ filter, onAdd }: { filter: string, onAdd: () => void }) {
     );
 }
 
-const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadItem, onRefresh: () => void }>(
-    ({ download, onRefresh }, ref) => {
+function ConfirmDialog({
+    isOpen,
+    onClose,
+    onConfirm,
+    title,
+    message,
+    confirmText = "Confirm",
+    cancelText = "Cancel",
+    showCheckbox = false,
+    checkboxLabel = "Do something",
+    checkboxChecked = false,
+    onCheckboxChange,
+    isLoading = false
+}: {
+    isOpen: boolean,
+    onClose: () => void,
+    onConfirm: () => void,
+    title: string,
+    message: string,
+    confirmText?: string,
+    cancelText?: string,
+    showCheckbox?: boolean,
+    checkboxLabel?: string,
+    checkboxChecked?: boolean,
+    onCheckboxChange?: (checked: boolean) => void,
+    isLoading?: boolean
+}) {
+    if (!isOpen) return null;
+
+    return (
+        <ModalPortal>
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    onClick={onClose}
+                    className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                />
+                <motion.div
+                    initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                    className="relative w-full max-w-md bg-brand-primary border border-brand-tertiary/30 rounded-2xl shadow-2xl overflow-hidden"
+                >
+                    <div className="p-6">
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-10 h-10 rounded-xl bg-status-error/10 flex items-center justify-center text-status-error">
+                                <Trash2 size={20} />
+                            </div>
+                            <h2 className="text-lg font-bold text-text-primary">{title}</h2>
+                        </div>
+                        <p className="text-sm text-text-secondary mb-6 leading-relaxed">
+                            {message}
+                        </p>
+
+                        {showCheckbox && (
+                            <label className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-brand-tertiary/20 hover:border-brand-tertiary/40 cursor-pointer transition-all mb-6 group">
+                                <div className="relative flex items-center justify-center">
+                                    <input
+                                        type="checkbox"
+                                        checked={checkboxChecked}
+                                        onChange={(e) => onCheckboxChange?.(e.target.checked)}
+                                        className="peer appearance-none w-4 h-4 rounded border border-white/60 checked:bg-white checked:border-white transition-all cursor-pointer"
+                                    />
+                                    <Check size={14} className="absolute text-black opacity-0 peer-checked:opacity-100 transition-opacity pointer-events-none" />
+                                </div>
+                                <span className="text-sm font-medium text-text-primary group-hover:text-white transition-colors">
+                                    {checkboxLabel}
+                                </span>
+                            </label>
+                        )}
+
+                        <div className="flex gap-3">
+                            <button
+                                onClick={onClose}
+                                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-bold text-black bg-white border border-brand-tertiary/20 hover:bg-white/90 transition-all active:scale-95 shadow-sm"
+                            >
+                                {cancelText}
+                            </button>
+                            <button
+                                onClick={onConfirm}
+                                disabled={isLoading}
+                                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-bold text-black bg-white hover:bg-white/90 transition-all active:scale-95 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                            >
+                                {isLoading && <div className="w-3.5 h-3.5 border-2 border-black border-t-transparent rounded-full animate-spin" />}
+                                {isLoading ? "Deleting..." : confirmText}
+                            </button>
+                        </div>
+                    </div>
+                </motion.div>
+            </div>
+        </ModalPortal>
+    );
+}
+
+const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
+    download: DownloadItem,
+    onRefresh: () => void,
+    setDownloads: React.Dispatch<React.SetStateAction<DownloadItem[]>>
+}>(
+    ({ download, onRefresh, setDownloads }, ref) => {
         const progress = download.size > 0 ? (download.downloaded / download.size) * 100 : 0;
         const [visualProgress, setVisualProgress] = useState(progress);
+        const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
+        const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+        const [deleteFiles, setDeleteFiles] = useState(download.status !== 'completed');
+        const [isDeleting, setIsDeleting] = useState(false);
 
         useEffect(() => {
             setVisualProgress(progress);
@@ -300,18 +411,41 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadI
 
         const handlePauseResume = async (e: React.MouseEvent) => {
             e.stopPropagation();
-            if (download.status === "downloading") {
-                await invoke("pause_download", { id: download.id });
-            } else {
-                await invoke("resume_download", { id: download.id });
+            try {
+                if (download.status === "downloading") {
+                    await invoke("pause_download", { id: download.id });
+                } else {
+                    await invoke("resume_download", { id: download.id });
+                }
+            } catch (err) {
+                console.error("Action failed:", err);
+                // Revert on failure
+                onRefresh();
             }
-            onRefresh();
         };
 
-        const handleDelete = async (e: React.MouseEvent) => {
-            e.stopPropagation();
-            await invoke("delete_download", { id: download.id });
-            onRefresh();
+        const handleDelete = async (e?: React.MouseEvent) => {
+            e?.stopPropagation();
+            setShowDeleteConfirm(true);
+        };
+
+        const performDelete = async () => {
+            setIsDeleting(true);
+            try {
+                await invoke("delete_download", { id: download.id, deleteFiles: deleteFiles });
+                setDownloads(prev => prev.filter(d => d.id !== download.id));
+                setShowDeleteConfirm(false);
+            } catch (err) {
+                console.error("Delete failed:", err);
+                onRefresh();
+            } finally {
+                setIsDeleting(false);
+            }
+        };
+
+        const handleContextMenu = (e: React.MouseEvent) => {
+            e.preventDefault();
+            setContextMenu({ x: e.clientX, y: e.clientY });
         };
 
         const getStatusColor = () => {
@@ -333,13 +467,25 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadI
                 initial={{ opacity: 0, y: 5, scale: 0.99 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
-                className="card-base p-4 group card-hover relative overflow-hidden"
+                className="card-base p-4 group card-hover relative overflow-hidden select-none"
+                onContextMenu={handleContextMenu}
+                onClick={() => setContextMenu(null)}
             >
                 <motion.div
                     layout
-                    className="absolute inset-y-0 left-0 bg-brand-tertiary/20 z-0 pointer-events-none"
-                    style={{ width: `${visualProgress}%` }}
-                    transition={{ type: "spring", stiffness: 400, damping: 40 }}
+                    className={clsx(
+                        "absolute inset-0 z-0 pointer-events-none transition-colors",
+                        download.status_text === "Initializing..." || download.status_text === "Fetching Metadata..."
+                            ? "bg-text-primary/10"
+                            : "bg-brand-tertiary/20"
+                    )}
+                    style={{ width: download.status_text === "Initializing..." || download.status_text === "Fetching Metadata..." ? "100%" : `${visualProgress}%` }}
+                    animate={download.status_text === "Initializing..." || download.status_text === "Fetching Metadata..." ? {
+                        opacity: [0.3, 0.6, 0.3]
+                    } : { opacity: 1 }}
+                    transition={download.status_text === "Initializing..." || download.status_text === "Fetching Metadata..." ? {
+                        duration: 2, repeat: Infinity, ease: "easeInOut"
+                    } : { type: "spring", stiffness: 400, damping: 40 }}
                 />
 
                 <div className="relative z-10 flex gap-4 items-center">
@@ -354,8 +500,8 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadI
                             </h3>
                             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                 {download.status !== "completed" && (
-                                    <button onClick={handlePauseResume} className="btn-ghost p-1.5">
-                                        {download.status === "downloading" ? <Pause size={14} /> : <Play size={14} />}
+                                    <button onClick={handlePauseResume} className="btn-ghost p-1.5" title={download.status === "downloading" ? "Pause" : "Resume"}>
+                                        {download.status === "downloading" && download.status_text !== "Paused" ? <Pause size={14} /> : <Play size={14} />}
                                     </button>
                                 )}
                                 <button onClick={() => invoke("show_in_folder", { path: download.filepath })} className="btn-ghost p-1.5">
@@ -374,27 +520,33 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadI
                                     "h-full rounded-full transition-all duration-500",
                                     download.status === 'completed' ? 'bg-status-success' :
                                         download.status === 'error' ? 'bg-status-error' :
-                                            download.status_text && download.status_text !== 'Starting...'
+                                            download.status_text && (download.status_text.includes("Metadata") || download.status_text === "Initializing...") && download.size === 0
                                                 ? 'bg-brand-primary animate-progress-indeterminate bg-[length:1rem_1rem] bg-gradient-to-r from-brand-primary via-brand-secondary to-brand-primary'
                                                 : 'bg-text-primary'
                                 )}
-                                style={{ width: `${download.status_text && download.status_text !== 'Starting...' ? 100 : visualProgress}%` }}
+                                style={{ width: `${download.status_text && (download.status_text.includes("Metadata") || download.status_text === "Initializing...") && download.size === 0 ? 100 : visualProgress}%` }}
                                 transition={{ type: "spring", stiffness: 400, damping: 40 }}
                             />
                         </div>
 
                         <div className="flex items-center justify-between text-xs text-text-secondary mt-0.5">
                             <div className="flex items-center gap-3">
-                                {download.status_text && (
-                                    <span className="text-white font-medium animate-pulse">{download.status_text}</span>
-                                )}
-                                {!download.status_text && (
+                                {download.status_text && (download.status_text.includes("Initializing") || download.status_text.includes("Metadata") || download.status_text === "Paused" || download.status_text === "Resuming..." || download.status_text.includes("Connecting")) ? (
+                                    <div className="flex items-center gap-2">
+                                        {download.status_text !== "Paused" && <div className="w-1.5 h-1.5 rounded-full bg-text-primary animate-pulse" />}
+                                        <span className={clsx("font-bold uppercase tracking-widest text-[9px]",
+                                            download.status_text === "Paused" ? "text-status-warning" : "text-white"
+                                        )}>
+                                            {download.status_text}
+                                        </span>
+                                    </div>
+                                ) : (
                                     <span className="font-medium tracking-wide">
                                         {formatSize(download.downloaded)} <span className="text-text-tertiary font-normal px-1">of</span> {formatSize(download.size)}
                                     </span>
                                 )}
 
-                                {download.status === 'downloading' && !download.status_text && (
+                                {download.status === 'downloading' && download.status_text !== "Paused" && (
                                     <>
                                         <div className="flex items-center gap-1 text-text-primary">
                                             <ArrowDown size={10} />
@@ -408,7 +560,7 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadI
                                 )}
                             </div>
                             <div className="flex items-center gap-2">
-                                {download.status === 'downloading' && (
+                                {download.status === 'downloading' && download.status_text !== "Paused" && (
                                     <div className="flex items-center gap-1 text-text-tertiary">
                                         <Clock size={10} />
                                         <span className="font-mono text-[10px] tracking-tight">{formatEta(download.eta)} remaining</span>
@@ -421,6 +573,69 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, { download: DownloadI
                         </div>
                     </div>
                 </div>
+
+                {/* Context Menu Overlay */}
+                <AnimatePresence>
+                    {contextMenu && (
+                        <>
+                            <div className="fixed inset-0 z-40" onClick={() => setContextMenu(null)} onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }} />
+                            <motion.div
+                                initial={{ opacity: 0, scale: 0.95 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                exit={{ opacity: 0, scale: 0.95 }}
+                                style={{ top: contextMenu.y, left: contextMenu.x }}
+                                className="fixed z-50 min-w-[180px] bg-brand-primary/95 backdrop-blur-xl border border-brand-tertiary/30 rounded-xl shadow-2xl p-1.5"
+                            >
+                                <button
+                                    onClick={(e) => { setContextMenu(null); handlePauseResume(e); }}
+                                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-xs font-medium text-text-primary hover:bg-brand-tertiary/30 rounded-lg transition-colors"
+                                >
+                                    {download.status === "downloading" ? (
+                                        <><Pause size={14} /> Pause</>
+                                    ) : (
+                                        <><Play size={14} /> Resume</>
+                                    )}
+                                </button>
+                                <button
+                                    onClick={() => { setContextMenu(null); invoke("show_in_folder", { path: download.filepath }); }}
+                                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-xs font-medium text-text-primary hover:bg-brand-tertiary/30 rounded-lg transition-colors"
+                                >
+                                    <FolderOpen size={14} />
+                                    Open Folder
+                                </button>
+                                <button
+                                    onClick={() => { setContextMenu(null); navigator.clipboard.writeText(download.url); }}
+                                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-xs font-medium text-text-primary hover:bg-brand-tertiary/30 rounded-lg transition-colors"
+                                >
+                                    <Play size={14} className="rotate-45" />
+                                    Copy Link
+                                </button>
+                                <div className="h-px bg-brand-tertiary/20 my-1 mx-1.5" />
+                                <button
+                                    onClick={() => { setContextMenu(null); handleDelete(); }}
+                                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-xs font-medium text-status-error hover:bg-status-error/10 rounded-lg transition-colors"
+                                >
+                                    <Trash2 size={14} />
+                                    Delete
+                                </button>
+                            </motion.div>
+                        </>
+                    )}
+                </AnimatePresence>
+
+                <ConfirmDialog
+                    isOpen={showDeleteConfirm}
+                    onClose={() => setShowDeleteConfirm(false)}
+                    onConfirm={performDelete}
+                    title="Delete Download?"
+                    message={`Are you sure you want to remove "${download.filename}" from your history?`}
+                    confirmText="Delete"
+                    showCheckbox={true}
+                    checkboxLabel="Delete downloaded files from disk"
+                    checkboxChecked={deleteFiles}
+                    onCheckboxChange={setDeleteFiles}
+                    isLoading={isDeleting}
+                />
             </motion.div>
         );
     }

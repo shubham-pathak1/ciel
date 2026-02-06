@@ -71,7 +71,8 @@ pub fn run() {
                 .unwrap_or(false);
 
             // Initialize the BitTorrent session (async)
-            let torrent_manager = tauri::async_runtime::block_on(torrent::TorrentManager::new(force_encryption))
+            let torrent_session_dir = app_handle.path().app_data_dir().unwrap().join("torrents");
+            let torrent_manager = tauri::async_runtime::block_on(torrent::TorrentManager::new(torrent_session_dir, force_encryption))
                 .expect("Failed to initialize TorrentManager struct");
             app.manage(torrent_manager);
 

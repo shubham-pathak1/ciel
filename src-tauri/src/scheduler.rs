@@ -86,6 +86,7 @@ async fn pause_all_downloads(app: &AppHandle) {
         for download in downloads {
             if download.status == db::DownloadStatus::Downloading {
                 let _ = commands::pause_download(
+                    app.clone(),
                     db_state.clone(),
                     manager.clone(),
                     torrent_manager.clone(),
