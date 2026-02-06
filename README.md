@@ -14,7 +14,7 @@ Ciel is a high-performance, open-source download manager for Windows built with 
 - **Automation**: Automatic folder reveal upon completion, system shutdown options, and sound notifications.
 - **Privacy Focus**: Completely offline-first. No tracking, no telemetry, no accounts. All data stays local.
 
-## The YouTube Journey (A Note on specialized Features)
+## Reason behind removing yt-dlp(youtube downloads feature)
 Ciel previously included a specialized YouTube download feature integration via `yt-dlp` and `FFmpeg`. However, due to the constant changes in platform bot-detection, cookie-locking, and the instability of maintaining specialized sidecars (which bloated the binary by over 100MB), I have made the strategic decision to **strip this feature** from the core application. 
 
 My goal is to keep Ciel as a **lean, 100% stable, and sidecar-free** download manager. 
