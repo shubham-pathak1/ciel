@@ -316,7 +316,6 @@ function ConfirmDialog({
     confirmText = "Confirm",
     cancelText = "Cancel",
     showCheckbox = false,
-    checkboxLabel = "Do something",
     checkboxChecked = false,
     onCheckboxChange,
     isLoading = false
@@ -329,7 +328,6 @@ function ConfirmDialog({
     confirmText?: string,
     cancelText?: string,
     showCheckbox?: boolean,
-    checkboxLabel?: string,
     checkboxChecked?: boolean,
     onCheckboxChange?: (checked: boolean) => void,
     isLoading?: boolean
@@ -375,7 +373,7 @@ function ConfirmDialog({
                                     <Check size={14} className="absolute text-black opacity-0 peer-checked:opacity-100 transition-opacity pointer-events-none" />
                                 </div>
                                 <span className="text-sm font-medium text-text-primary group-hover:text-white transition-colors">
-                                    {checkboxLabel}
+                                    Delete selected files from the disk
                                 </span>
                             </label>
                         )}
@@ -648,7 +646,6 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                     message={`Are you sure you want to remove "${download.filename}" from your history?`}
                     confirmText="Delete"
                     showCheckbox={true}
-                    checkboxLabel="Delete downloaded files from disk"
                     checkboxChecked={deleteFiles}
                     onCheckboxChange={setDeleteFiles}
                     isLoading={isDeleting}
@@ -731,7 +728,7 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                 }
 
                 await invoke("add_download", {
-                    url,
+                    url: typeInfo.resolved_url || url,
                     filename: typeInfo.hinted_filename || "download",
                     filepath: "",
                     outputFolder: output_folder || null,

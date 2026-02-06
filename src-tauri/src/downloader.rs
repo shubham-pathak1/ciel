@@ -554,6 +554,15 @@ impl Downloader {
         (on_progress)(self.progress.lock().unwrap().clone());
 
         let response = self.client.get(&self.config.url).send().await?;
+        
+        // Safety check: If we're getting HTML but expecting a file, it's a login/warning page
+        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if content_type.contains("text/html") {
+            return Err(DownloadError::Network("Server returned a webpage instead of a file. Login may be required.".to_string()));
+        }
+
         let total_size = response.content_length().unwrap_or(0);
 
         let file_raw = tokio::fs::File::create(&self.config.filepath).await?;
@@ -625,7 +634,7 @@ pub async fn check_range_support(client: &Client, url: &str) -> Result<(bool, u6
         .send().await.map_err(|e| DownloadError::Network(e.to_string()))?;
 
     let filename = extract_filename(url, response.headers());
-    let filename_opt = if filename != "download" && filename != "download_file" {
+    let filename_opt = if filename != "download" && filename != "download_file" && filename != "uc" {
         Some(filename)
     } else {
         None

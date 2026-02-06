@@ -2,6 +2,8 @@
   "name": "ciel",
   "private": true,
   "version": "0.1.0",
+  "author": "Shubham Pathak",
+  "description": "Blazingly fast, privacy-focused download manager built with Rust.",
   "type": "module",
   "scripts": {
     "dev": "vite",

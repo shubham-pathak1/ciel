@@ -18,6 +18,7 @@ import { motion } from "framer-motion";
 interface SettingsState {
     download_path: string;
     max_connections: string;
+    max_concurrent: string;
     auto_resume: boolean;
     theme: string;
     ask_location: boolean;
@@ -31,6 +32,7 @@ interface SettingsState {
     scheduler_start_time: string;
     scheduler_pause_time: string;
     auto_organize: boolean;
+    cookie_browser: string;
 }
 
 /**
@@ -46,6 +48,7 @@ export function Settings() {
     const [settings, setSettings] = useState<SettingsState>({
         download_path: "./downloads",
         max_connections: "8",
+        max_concurrent: "3",
         auto_resume: true,
         theme: "dark",
         ask_location: false,
@@ -59,6 +62,7 @@ export function Settings() {
         scheduler_start_time: "02:00",
         scheduler_pause_time: "08:00",
         auto_organize: false,
+        cookie_browser: "none",
     });
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
@@ -75,6 +79,7 @@ export function Settings() {
             setSettings({
                 download_path: result.download_path || "./downloads",
                 max_connections: result.max_connections || "8",
+                max_concurrent: result.max_concurrent || "3",
                 auto_resume: result.auto_resume === "true",
                 theme: result.theme || "dark",
                 ask_location: result.ask_location === "true",
@@ -88,6 +93,7 @@ export function Settings() {
                 scheduler_start_time: result.scheduler_start_time || "02:00",
                 scheduler_pause_time: result.scheduler_pause_time || "08:00",
                 auto_organize: result.auto_organize === "true",
+                cookie_browser: result.cookie_browser || "none",
             });
 
             // Check for active downloads
@@ -298,16 +304,34 @@ export function Settings() {
                                 </div>
                             </div>
                             <div className="space-y-2">
-                                <p className="text-xs text-text-tertiary font-medium">Higher values may increase speed but also server load.</p>
+                                <p className="text-xs text-text-tertiary font-medium">Number of parallel streams used to pull a single file faster.</p>
                                 {parseInt(settings.max_connections) > 32 && (
                                     <div className="flex items-start gap-2 p-3 rounded bg-status-error/10 border border-status-error/20 text-status-error text-[10px] leading-relaxed">
                                         <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
                                         <p>
-                                            <strong>CAUTION:</strong> Using more than 32 connections may lead to temporary IP bans or rate-limiting by platforms like YouTube or Google Drive. Use at your own risk.
+                                            <strong>CAUTION:</strong> Over 32 connections may lead to IP bans or rate-limiting.
                                         </p>
                                     </div>
                                 )}
                             </div>
+                        </div>
+
+                        <div className="space-y-4">
+                            <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Simultaneous Downloads</label>
+                            <div className="flex items-center gap-4">
+                                <input
+                                    type="range"
+                                    min="1"
+                                    max="10"
+                                    value={settings.max_concurrent}
+                                    onChange={(e) => handleChange("max_concurrent", e.target.value)}
+                                    className="flex-1 h-2 bg-brand-tertiary rounded-lg appearance-none cursor-pointer accent-text-primary"
+                                />
+                                <div className="w-16 h-10 flex items-center justify-center bg-brand-secondary rounded-lg border border-surface-border text-text-primary font-bold font-mono">
+                                    {settings.max_concurrent}
+                                </div>
+                            </div>
+                            <p className="text-xs text-text-tertiary font-medium">How many different files Ciel will download at once.</p>
                         </div>
 
                         <SettingItem
@@ -326,7 +350,7 @@ export function Settings() {
                     <div className="space-y-8 animate-fade-in">
                         <SettingItem
                             label="Open folder on finish"
-                            description="Automatically open the download folder and select the file when completed."
+                            description="Automatically open the download folder when completed."
                         >
                             <SettingToggle
                                 enabled={settings.open_folder_on_finish}
@@ -336,7 +360,7 @@ export function Settings() {
 
                         <SettingItem
                             label="Auto-Organize"
-                            description="Automatically sort downloads into category-specific folders (e.g., /Videos, /Music)."
+                            description="Automatically sort downloads into category-specific folders."
                         >
                             <SettingToggle
                                 enabled={settings.auto_organize}
@@ -346,7 +370,7 @@ export function Settings() {
 
                         <SettingItem
                             label="Shutdown when done"
-                            description="Shutdown the PC automatically after all active downloads are finished."
+                            description="Shutdown the PC automatically after all downloads are finished."
                         >
                             <SettingToggle
                                 enabled={settings.shutdown_on_finish}
@@ -374,7 +398,7 @@ export function Settings() {
                                 <div className="flex items-center justify-between">
                                     <div className="flex flex-col gap-0.5">
                                         <span className="text-sm font-medium text-text-primary tracking-tight">Enable Scheduler</span>
-                                        <span className="text-xs text-text-tertiary">Automatically manage downloads based on time</span>
+                                        <span className="text-xs text-text-tertiary">Manage downloads based on time</span>
                                     </div>
                                     <SettingToggle
                                         enabled={settings.scheduler_enabled}
@@ -409,11 +433,45 @@ export function Settings() {
                     </div>
                 );
             case "privacy":
+                const browsers = [
+                    { id: "none", name: "None (Clean)" },
+                    { id: "chrome", name: "Google Chrome" },
+                    { id: "firefox", name: "Mozilla Firefox" },
+                    { id: "edge", name: "Microsoft Edge" },
+                    { id: "brave", name: "Brave Browser" },
+                    { id: "opera", name: "Opera" },
+                    { id: "vivaldi", name: "Vivaldi" },
+                    { id: "safari", name: "Safari" },
+                ];
+
                 return (
                     <div className="space-y-8 animate-fade-in">
+                        <div className="space-y-4">
+                            <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Browser Authentication</label>
+                            <div className="relative">
+                                <select
+                                    value={settings.cookie_browser}
+                                    onChange={(e) => handleChange("cookie_browser", e.target.value)}
+                                    className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-sm text-text-primary appearance-none focus:outline-none focus:border-text-secondary transition-all cursor-pointer"
+                                >
+                                    {browsers.map(b => (
+                                        <option key={b.id} value={b.id} className="bg-brand-secondary text-text-primary">
+                                            {b.name}
+                                        </option>
+                                    ))}
+                                </select>
+                                <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-text-tertiary">
+                                    <Clock size={16} />
+                                </div>
+                            </div>
+                            <p className="text-xs text-text-tertiary font-medium">
+                                Extract session cookies to bypass 403 Forbidden errors.
+                            </p>
+                        </div>
+
                         <SettingItem
                             label="Autocatch (Clipboard)"
-                            description="Automatically detect and prompt for URLs in your clipboard."
+                            description="Automatically detect URLs in your clipboard."
                         >
                             <SettingToggle
                                 enabled={settings.autocatch_enabled}
@@ -423,7 +481,7 @@ export function Settings() {
 
                         <SettingItem
                             label="Force Encryption (PE)"
-                            description="Obfuscate torrent traffic to bypass ISP throttling. (Requires Restart)"
+                            description="Obfuscate torrent traffic to bypass throttling."
                         >
                             <SettingToggle
                                 enabled={settings.torrent_encryption}
@@ -437,11 +495,7 @@ export function Settings() {
                     <div className="space-y-6 text-center py-4 animate-fade-in">
                         <div className="relative w-24 h-24 mx-auto">
                             <div className="relative w-full h-full flex items-center justify-center p-2">
-                                <img
-                                    src={logo}
-                                    alt="Ciel Logo"
-                                    className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(255,255,255,0.1)]"
-                                />
+                                <img src={logo} alt="Ciel Logo" className="w-full h-full object-contain filter drop-shadow-[0_0_15px_rgba(255,255,255,0.1)]" />
                             </div>
                         </div>
 
@@ -452,40 +506,19 @@ export function Settings() {
                             </div>
                         </div>
 
-                        <p className="text-sm text-text-secondary leading-relaxed max-w-md mx-auto">
-                            Built for speed!
-                        </p>
+                        <p className="text-sm text-text-secondary leading-relaxed max-w-md mx-auto">Built for speed!</p>
 
                         <div className="grid grid-cols-2 gap-4 max-w-sm mx-auto">
-                            <a
-                                href="https://github.com/shubham-pathak1/ciel"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
-                            >
+                            <a href="https://github.com/shubham-pathak1/ciel" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group">
                                 <Github size={14} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
                                 GitHub
                             </a>
-                            <a
-                                href="https://github.com/shubham-pathak1/ciel/blob/main/LICENSE"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
-                            >
+                            <a href="https://github.com/shubham-pathak1/ciel/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group">
                                 <FileText size={14} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
                                 License
                             </a>
-                            <a
-                                href="https://ciel-app.vercel.app/"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="col-span-2 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group"
-                            >
-                                <Globe size={14} className="text-text-tertiary group-hover:text-text-primary transition-colors" />
-                                Visit Website
-                            </a>
                         </div>
-                    </div >
+                    </div>
                 );
             default:
                 return (
@@ -494,7 +527,7 @@ export function Settings() {
                             <Info size={32} />
                         </div>
                         <h3 className="text-lg font-medium text-text-primary mb-2">Coming Soon</h3>
-                        <p className="text-sm text-text-tertiary">This setting section is under development.</p>
+                        <p className="text-sm text-text-tertiary">This section is under development.</p>
                     </div>
                 );
         }
@@ -554,6 +587,6 @@ export function Settings() {
                     {renderSectionContent()}
                 </div>
             </div>
-        </div >
+        </div>
     );
 }

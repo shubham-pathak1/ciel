@@ -7,8 +7,10 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use rookie;
 
 
+use std::fs;
 use tauri_plugin_notification::NotificationExt;
 
 /// Orchestrates the lifecycle of active HTTP downloads.
@@ -55,6 +57,32 @@ impl DownloadManager {
     }
 }
 
+/// Helper to transform Google Drive viewer links into direct download links.
+fn transform_google_drive_url(url: &str) -> String {
+    // 1. Convert /file/d/ID/view -> uc?export=download&id=ID
+    if url.contains("drive.google.com/file/d/") && (url.contains("/view") || url.contains("/edit")) {
+        if let Some(re) = regex::Regex::new(r"drive\.google\.com/file/d/([^/?#]+)").ok() {
+            if let Some(caps) = re.captures(url) {
+                if let Some(id) = caps.get(1) {
+                    return format!("https://drive.google.com/uc?export=download&id={}&confirm=t", id.as_str());
+                }
+            }
+        }
+    }
+
+    // 2. Convert open?id=ID -> uc?export=download&id=ID
+    if url.contains("drive.google.com/open?id=") {
+        if let Some(re) = regex::Regex::new(r"id=([^&?#]+)").ok() {
+            if let Some(caps) = re.captures(url) {
+                if let Some(id) = caps.get(1) {
+                    return format!("https://drive.google.com/uc?export=download&id={}&confirm=t", id.as_str());
+                }
+            }
+        }
+    }
+    url.to_string()
+}
+
 // ... types for validation ...
 /// Detailed metadata discovered during URL validation.
 #[derive(serde::Serialize)]
@@ -67,6 +95,8 @@ pub struct UrlTypeInfo {
     content_length: Option<u64>,
     /// A suggested filename extracted from the `Content-Disposition` header.
     hinted_filename: Option<String>,
+    /// The final resolved URL (useful for Drive tokens discovered during validation).
+    resolved_url: Option<String>,
 }
 
 /// Performs a lightweight inspection of a URL to determine its type and metadata.
@@ -74,20 +104,36 @@ pub struct UrlTypeInfo {
 /// Instead of downloading the full file, it uses HTTP `GET` with a `Range` header
 /// or sniffs the first few bytes to extract headers and verify the content type.
 #[tauri::command]
-pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
+pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Result<UrlTypeInfo, String> {
+    let url = transform_google_drive_url(&url);
     if url.starts_with("magnet:") {
         return Ok(UrlTypeInfo {
             is_magnet: true,
             content_type: None,
             content_length: None,
             hinted_filename: None,
+            resolved_url: Some(url),
         });
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .build()
-        .unwrap_or_default();
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    // Automatically fetch cookies if a browser is selected in settings
+    if let Ok(Some(browser)) = db::get_setting(&db_state.path, "cookie_browser") {
+        if browser != "none" {
+            if let Some(cookies) = get_cookies_from_browser(&browser, &url) {
+                use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
+                let mut headers = HeaderMap::new();
+                if let Ok(v) = HeaderValue::from_str(&cookies) {
+                    headers.insert(COOKIE, v);
+                    builder = builder.default_headers(headers);
+                }
+            }
+        }
+    }
+
+    let client = builder.build().unwrap_or_default();
 
     // Use GET with Range: bytes=0-0 to get headers (including Content-Disposition) without downloading
     let response = client.get(&url)
@@ -104,26 +150,79 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok());
 
-    let hinted_filename = headers.get(reqwest::header::CONTENT_DISPOSITION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            // First try RFC 5987 format: filename*=CHARSET''... (e.g., UTF-8, ISO-8859-1, etc.)
-            // The format is: filename*=<charset>'<language>'<encoded-value>
-            if let Some(re) = regex::Regex::new(r"(?i)filename\*\s*=\s*([^']+)'[^']*'([^;\s]+)").ok() {
-                if let Some(caps) = re.captures(s) {
-                    if let Some(m) = caps.get(2) {
-                        // URL decode the filename (works for any charset, decoded as UTF-8 lossy)
-                        return Some(percent_encoding::percent_decode_str(m.as_str())
-                            .decode_utf8_lossy()
-                            .to_string());
-                    }
+    let hinted_filename = Some(crate::downloader::extract_filename(&url, headers));
+
+    // Special check for Google Drive: if it's returning HTML, it's likely the "virus scan" warning or login page.
+    if url.contains("drive.google.com/uc") && content_type.as_ref().map(|s| s.contains("text/html")).unwrap_or(false) {
+        println!("[Drive] Warning page detected, attempting to scrape confirm token...");
+        // Optimization: Try to find a confirm token in the HTML body if confirm=t failed.
+        // We need to fetch the FULL body, so we retry without the Range header.
+        if let Ok(full_res) = client.get(&url).send().await {
+            let body = full_res.text().await.unwrap_or_default();
+            
+            // 1. Scrape metadata from HTML as a fallback
+            let mut scraped_filename = None;
+            let mut scraped_size = None;
+            if let Some(re) = regex::Regex::new(r#"class="uc-name-size"><a [^>]+>([^<]+)</a>\s*\(([^)]+)\)"#).ok() {
+                if let Some(caps) = re.captures(&body) {
+                    scraped_filename = caps.get(1).map(|m| m.as_str().to_string());
+                    scraped_size = caps.get(2).map(|m| m.as_str().to_string());
                 }
             }
-            // Fallback: try simple filename="..." or filename=...
-            let re = regex::Regex::new(r#"filename\s*=\s*(?:"([^"]+)"|([^;\s]+))"#).ok()?;
-            let caps = re.captures(s)?;
-            caps.get(1).or(caps.get(2)).map(|m| m.as_str().to_string())
-        });
+
+            // 2. Try to find confirm token and uuid
+            let mut found_token = None;
+            let mut found_uuid = None;
+            
+            if let Some(re) = regex::Regex::new(r#"name="confirm" value="([^"]+)""#).ok() {
+                found_token = re.captures(&body).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+            }
+            if let Some(re) = regex::Regex::new(r#"name="uuid" value="([^"]+)""#).ok() {
+                found_uuid = re.captures(&body).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+            }
+
+            // 3. Loop Prevention: If we only found 't' and we already had it, or we found nothing new
+            if let Some(ref token) = found_token {
+                if token == "t" && url.contains("confirm=t") {
+                    println!("[Drive] Token is still 't', bypass failed (likely missing authorized session).");
+                    found_token = None; // Stop recursion
+                }
+            }
+
+            if let Some(token) = found_token {
+                let mut new_url = url.clone();
+                if !new_url.contains("confirm=") {
+                    new_url = format!("{}&confirm={}", new_url, token);
+                } else {
+                    new_url = new_url.replace("confirm=t", &format!("confirm={}", token));
+                }
+                
+                if let Some(uuid) = found_uuid {
+                    if !new_url.contains("uuid=") {
+                        new_url = format!("{}&uuid={}", new_url, uuid);
+                    }
+                }
+                
+                println!("[Drive] Scraped token and uuid, retrying...");
+                return Box::pin(validate_url_type(db_state, new_url)).await;
+            }
+
+            // 4. Return Warning with scraped metadata
+            let display_name = match (scraped_filename, scraped_size) {
+                (Some(n), Some(s)) => format!("{} ({}) - Login Required", n, s),
+                (Some(n), None) => format!("{} - Login Required", n),
+                _ => "Google Drive Warning (Check Settings > Privacy)".to_string(),
+            };
+
+            return Ok(UrlTypeInfo {
+                is_magnet: false,
+                content_type: Some("text/html".to_string()),
+                content_length: None,
+                hinted_filename: Some(display_name),
+                resolved_url: Some(url),
+            });
+        }
+    }
 
     // 3. If content-type is generic or missing, try to sniff magic bytes
     if content_type.as_deref().map_or(true, |ct| ct == "application/octet-stream" || ct == "application/x-zip-compressed") {
@@ -165,6 +264,7 @@ pub async fn validate_url_type(url: String) -> Result<UrlTypeInfo, String> {
         content_type,
         content_length,
         hinted_filename: final_filename,
+        resolved_url: Some(url),
     })
 }
 
@@ -371,8 +471,18 @@ pub async fn add_download(
     _filepath: String,
     output_folder: Option<String>,
     user_agent: Option<String>,
-    cookies: Option<String>,
+    mut cookies: Option<String>,
 ) -> Result<Download, String> {
+    let url = transform_google_drive_url(&url);
+
+    // Automatically fetch cookies if a browser is selected in settings and none provided
+    if cookies.is_none() || cookies.as_ref().map(|s| s.is_empty()).unwrap_or(false) {
+        if let Ok(Some(browser)) = db::get_setting(&db_state.path, "cookie_browser") {
+            if browser != "none" {
+                cookies = get_cookies_from_browser(&browser, &url);
+            }
+        }
+    }
 
     // Get max connections from settings
     let max_connections = db::get_setting(&db_state.path, "max_connections")
@@ -574,6 +684,21 @@ async fn start_download_task(
 
     // Spawn download in background
     tokio::spawn(async move {
+        let mut cookies = download.cookies.clone();
+
+        // Automatic Browser Cookie Extraction
+        if cookies.is_none() {
+            if let Ok(Some(browser)) = db::get_setting(&db_path, "cookie_browser") {
+                if browser != "none" {
+                    cookies = get_cookies_from_browser(&browser, &url);
+                    if let Some(ref c) = cookies {
+                        // Log success and update DB so we don't have to extract every time for this link
+                        let _ = db::update_download_cookies(&db_path, &id, c);
+                    }
+                }
+            }
+        }
+
         let config = DownloadConfig {
             id: id.clone(),
             url,
@@ -582,7 +707,7 @@ async fn start_download_task(
             chunk_size: 5 * 1024 * 1024,
             speed_limit,
             user_agent: download.user_agent.clone(),
-            cookies: download.cookies.clone(),
+            cookies,
         };
 
         let downloader = Downloader::new(config)
@@ -953,5 +1078,105 @@ pub fn show_in_folder_internal(app: AppHandle, db_path: &str, path: String) -> R
 #[tauri::command]
 pub fn clear_finished(db_state: State<DbState>) -> Result<(), String> {
     db::delete_finished_downloads(&db_state.path).map_err(|e| e.to_string())
+}
+
+/// New Deep Search for Firefox cookies on Windows to bypass file locks and find correct profiles.
+fn get_cookies_from_firefox_deep(url_str: &str) -> Option<String> {
+    let domain = url::Url::parse(url_str).ok()?.host_str()?.to_string();
+    let target_host = domain.to_lowercase();
+    
+    // 1. Resolve Firefox Profile directory on Windows
+    let app_data = std::env::var("APPDATA").ok()?;
+    let profiles_path = Path::new(&app_data).join("Mozilla").join("Firefox").join("Profiles");
+    
+    println!("[Firefox] Scaning for profiles in: {:?}", profiles_path);
+    if !profiles_path.exists() { 
+        println!("[Firefox] Profiles directory not found.");
+        return None; 
+    }
+
+    let mut all_cookies = Vec::new();
+
+    // 2. Iterate through all profile folders
+    if let Ok(entries) = fs::read_dir(profiles_path) {
+        for entry in entries.flatten() {
+            let cookie_db = entry.path().join("cookies.sqlite");
+            if cookie_db.exists() {
+                println!("[Firefox] Found profile with cookies: {:?}", entry.path());
+                // 3. SECRETS OF THE DEEP: Copy the database to bypass Firefox's file lock
+                let temp_db = std::env::temp_dir().join(format!("ciel_tmp_cookies_{}.sqlite", uuid::Uuid::new_v4()));
+                if fs::copy(&cookie_db, &temp_db).is_ok() {
+                    // 4. Use rusqlite to read the copied database
+                    if let Ok(conn) = rusqlite::Connection::open(&temp_db) {
+                        let stmt = conn.prepare("SELECT name, value, host FROM moz_cookies").ok();
+                        if let Some(mut stmt) = stmt {
+                            let rows = stmt.query_map([], |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                            }).ok();
+                            
+                            if let Some(rows) = rows {
+                                for row in rows.flatten() {
+                                    let (name, value, host) = row;
+                                    let cookie_domain = host.trim_start_matches('.').to_lowercase();
+                                    if target_host == cookie_domain || target_host.ends_with(&format!(".{}", cookie_domain)) {
+                                        all_cookies.push(format!("{}={}", name, value));
+                                    }
+                                }
+                            }
+                            println!("[Firefox] Extracted {} relevant cookies from this profile.", all_cookies.len());
+                        }
+                    }
+                    let _ = fs::remove_file(temp_db);
+                }
+            }
+        }
+    }
+
+    if all_cookies.is_empty() { None } else { Some(all_cookies.join("; ")) }
+}
+
+/// Helper: Extracts cookies for a specific URL from a chosen browser using `rookie`.
+fn get_cookies_from_browser(browser: &str, url: &str) -> Option<String> {
+    // SPECIAL CASE: Deep Scan for Firefox on Windows
+    #[cfg(target_os = "windows")]
+    if browser.to_lowercase() == "firefox" {
+        if let Some(cookies) = get_cookies_from_firefox_deep(url) {
+            return Some(cookies);
+        }
+    }
+
+    let domain = url::Url::parse(url).ok()?.host_str()?.to_string();
+    
+    let cookies_result = match browser.to_lowercase().as_str() {
+        "chrome" => rookie::chrome(None),
+        "firefox" => rookie::firefox(None),
+        "edge" => rookie::edge(None),
+        "brave" => rookie::brave(None),
+        "opera" => rookie::opera(None),
+        "vivaldi" => rookie::vivaldi(None),
+        #[cfg(target_os = "macos")]
+        "safari" => rookie::safari(None),
+        _ => return None,
+    };
+
+    match cookies_result {
+        Ok(cookies) => {
+            let target_host = domain.to_lowercase();
+            let cookie_str = cookies.iter()
+                .filter(|c| {
+                    let cookie_domain = c.domain.trim_start_matches('.').to_lowercase();
+                    target_host == cookie_domain || target_host.ends_with(&format!(".{}", cookie_domain))
+                })
+                .map(|c| format!("{}={}", c.name, c.value))
+                .collect::<Vec<_>>()
+                .join("; ");
+            
+            if cookie_str.is_empty() { None } else { Some(cookie_str) }
+        }
+        Err(e) => {
+            eprintln!("Failed to extract cookies from {}: {}", browser, e);
+            None
+        }
+    }
 }
 

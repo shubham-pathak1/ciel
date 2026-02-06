@@ -46,9 +46,19 @@
             "digestAlgorithm": "sha256",
             "timestampUrl": "",
             "nsis": {
-                "installerIcon": "icons/icon.ico"
+                "installerIcon": "icons/icon.ico",
+                "headerImage": "../src/assets/header_fixed.bmp",
+                "sidebarImage": "../src/assets/sidebar_fixed.bmp",
+                "installerHooks": "installer.nsh",
+                "installMode": "both",
+                "languages": [
+                    "English"
+                ],
+                "compression": "lzma",
+                "displayLanguageSelector": false
             }
         },
+        "publisher": "Shubham Pathak",
         "externalBin": []
     },
     "plugins": {

@@ -439,6 +439,19 @@ pub fn update_download_name<P: AsRef<Path>>(
     Ok(())
 }
 
+pub fn update_download_cookies<P: AsRef<Path>>(
+    db_path: P,
+    id: &str,
+    cookies: &str,
+) -> SqliteResult<()> {
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "UPDATE downloads SET cookies = ?1 WHERE id = ?2",
+        (cookies, id),
+    )?;
+    Ok(())
+}
+
 /// Removes a download record and its associated chunks/history from the database.
 pub fn delete_download_by_id<P: AsRef<Path>>(db_path: P, id: &str) -> SqliteResult<()> {
     let conn = open_db(db_path)?;
