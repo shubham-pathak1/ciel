@@ -6,8 +6,6 @@ export default {
             colors: {
                 // Primary brand colors (Deep Space Navy)
                 brand: {
-                    primary: "#0a0f2e", // Deepest navy for backgrounds
-                    secondary: "#151b40", // Lighter navy for surface contrast
                     primary: "#18181b", // Zinc 900 (Main Background - Dark Grey)
                     secondary: "#09090b", // Zinc 950 (Black - Components)
                     tertiary: "#27272a", // Zinc 800 (Borders/Accents)

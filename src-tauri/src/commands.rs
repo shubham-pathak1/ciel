@@ -201,6 +201,24 @@ pub(crate) fn resolve_download_path(app: &tauri::AppHandle, db_path: &str, provi
         }
     };
 
+    // --- START AUTO-ORGANIZE LOGIC ---
+    let auto_organize = db::get_setting(db_path, "auto_organize")
+        .unwrap_or(None)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
+    let base_dir = if auto_organize {
+        let category = get_category_from_filename(p.file_name().unwrap_or_default().to_str().unwrap_or_default());
+        if category != "Other" {
+            base_dir.join(category)
+        } else {
+            base_dir
+        }
+    } else {
+        base_dir
+    };
+    // --- END AUTO-ORGANIZE LOGIC ---
+
     // Ensure base directory exists
     let _ = std::fs::create_dir_all(&base_dir);
 

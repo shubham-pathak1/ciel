@@ -10,6 +10,7 @@ import { Folder, Globe, Gauge, Shield, Info, Check, Save, AlertTriangle, Github,
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { open } from "@tauri-apps/plugin-dialog";
+import { motion } from "framer-motion";
 
 /**
  * Complete application configuration state.
@@ -29,6 +30,7 @@ interface SettingsState {
     scheduler_enabled: boolean;
     scheduler_start_time: string;
     scheduler_pause_time: string;
+    auto_organize: boolean;
 }
 
 /**
@@ -56,6 +58,7 @@ export function Settings() {
         scheduler_enabled: false,
         scheduler_start_time: "02:00",
         scheduler_pause_time: "08:00",
+        auto_organize: false,
     });
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
@@ -84,6 +87,7 @@ export function Settings() {
                 scheduler_enabled: result.scheduler_enabled === "true",
                 scheduler_start_time: result.scheduler_start_time || "02:00",
                 scheduler_pause_time: result.scheduler_pause_time || "08:00",
+                auto_organize: result.auto_organize === "true",
             });
 
             // Check for active downloads
@@ -141,6 +145,44 @@ export function Settings() {
         }
     };
 
+    /**
+     * Reusable UI Components for Consistency
+     */
+    const SettingItem = ({ label, description, children }: { label: string, description: string, children: React.ReactNode }) => (
+        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl transition-all duration-200">
+            <div>
+                <h4 className="text-base font-medium text-text-primary mb-1">{label}</h4>
+                <p className="text-xs text-text-tertiary">{description}</p>
+            </div>
+            {children}
+        </div>
+    );
+
+    const SettingToggle = ({ enabled, onToggle }: { enabled: boolean, onToggle: () => void }) => (
+        <button
+            onClick={onToggle}
+            className={clsx(
+                "w-12 h-6 rounded-full transition-colors duration-500 ease-in-out relative shrink-0 border border-surface-border/50",
+                enabled ? 'bg-text-primary' : 'bg-brand-tertiary'
+            )}
+        >
+            <motion.div
+                initial={false}
+                animate={{
+                    x: enabled ? 28 : 4,
+                    backgroundColor: enabled ? "#09090b" : "#f4f4f5"
+                }}
+                transition={{
+                    type: "spring",
+                    stiffness: 500,
+                    damping: 30,
+                    mass: 0.8
+                }}
+                className="absolute top-1 w-4 h-4 rounded-full shadow-[0_1px_3px_rgba(0,0,0,0.2)]"
+            />
+        </button>
+    );
+
     const sections = [
         { id: "general", title: "General", icon: Folder },
         { id: "network", title: "Network", icon: Globe },
@@ -174,24 +216,15 @@ export function Settings() {
                             <p className="text-xs text-text-tertiary font-medium">All your downloads will be saved here unless specified otherwise.</p>
                         </div>
 
-                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
-                            <div>
-                                <h4 className="text-base font-medium text-text-primary mb-1">Ask for location</h4>
-                                <p className="text-xs text-text-tertiary">Select download location manually for every new task.</p>
-                            </div>
-                            <button
-                                onClick={() => handleChange("ask_location", !settings.ask_location)}
-                                className={clsx(
-                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.ask_location ? 'bg-text-primary' : 'bg-brand-tertiary'
-                                )}
-                            >
-                                <div className={clsx(
-                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.ask_location ? 'translate-x-7' : 'translate-x-1'
-                                )} />
-                            </button>
-                        </div>
+                        <SettingItem
+                            label="Ask for location"
+                            description="Select download location manually for every new task."
+                        >
+                            <SettingToggle
+                                enabled={settings.ask_location}
+                                onToggle={() => handleChange("ask_location", !settings.ask_location)}
+                            />
+                        </SettingItem>
                     </div>
                 );
             case "network":
@@ -277,85 +310,59 @@ export function Settings() {
                             </div>
                         </div>
 
-                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
-                            <div>
-                                <h4 className="text-base font-medium text-text-primary mb-1">Auto-Resume Downloads</h4>
-                                <p className="text-xs text-text-tertiary">Automatically resume interrupted downloads when app starts.</p>
-                            </div>
-                            <button
-                                onClick={() => handleChange("auto_resume", !settings.auto_resume)}
-                                className={clsx(
-                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.auto_resume ? 'bg-text-primary' : 'bg-brand-tertiary'
-                                )}
-                            >
-                                <div className={clsx(
-                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.auto_resume ? 'translate-x-7' : 'translate-x-1'
-                                )} />
-                            </button>
-                        </div>
+                        <SettingItem
+                            label="Auto-Resume Downloads"
+                            description="Automatically resume interrupted downloads when app starts."
+                        >
+                            <SettingToggle
+                                enabled={settings.auto_resume}
+                                onToggle={() => handleChange("auto_resume", !settings.auto_resume)}
+                            />
+                        </SettingItem>
                     </div>
                 );
             case "automation":
                 return (
                     <div className="space-y-8 animate-fade-in">
-                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
-                            <div>
-                                <h4 className="text-base font-medium text-text-primary mb-1">Open folder on finish</h4>
-                                <p className="text-xs text-text-tertiary">Automatically open the download folder and select the file when completed.</p>
-                            </div>
-                            <button
-                                onClick={() => handleChange("open_folder_on_finish", !settings.open_folder_on_finish)}
-                                className={clsx(
-                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.open_folder_on_finish ? 'bg-text-primary' : 'bg-brand-tertiary'
-                                )}
-                            >
-                                <div className={clsx(
-                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.open_folder_on_finish ? 'translate-x-7' : 'translate-x-1'
-                                )} />
-                            </button>
-                        </div>
+                        <SettingItem
+                            label="Open folder on finish"
+                            description="Automatically open the download folder and select the file when completed."
+                        >
+                            <SettingToggle
+                                enabled={settings.open_folder_on_finish}
+                                onToggle={() => handleChange("open_folder_on_finish", !settings.open_folder_on_finish)}
+                            />
+                        </SettingItem>
 
-                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
-                            <div>
-                                <h4 className="text-base font-medium text-text-primary mb-1">Shutdown when done</h4>
-                                <p className="text-xs text-text-tertiary">Shutdown the PC automatically after all active downloads are finished.</p>
-                            </div>
-                            <button
-                                onClick={() => handleChange("shutdown_on_finish", !settings.shutdown_on_finish)}
-                                className={clsx(
-                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.shutdown_on_finish ? 'bg-text-primary' : 'bg-brand-tertiary'
-                                )}
-                            >
-                                <div className={clsx(
-                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.shutdown_on_finish ? 'translate-x-7' : 'translate-x-1'
-                                )} />
-                            </button>
-                        </div>
+                        <SettingItem
+                            label="Auto-Organize"
+                            description="Automatically sort downloads into category-specific folders (e.g., /Videos, /Music)."
+                        >
+                            <SettingToggle
+                                enabled={settings.auto_organize}
+                                onToggle={() => handleChange("auto_organize", !settings.auto_organize)}
+                            />
+                        </SettingItem>
 
-                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
-                            <div>
-                                <h4 className="text-base font-medium text-text-primary mb-1">Sound Notifications</h4>
-                                <p className="text-xs text-text-tertiary">Play a subtle sound when a download task completes.</p>
-                            </div>
-                            <button
-                                onClick={() => handleChange('sound_on_finish', !settings.sound_on_finish)}
-                                className={clsx(
-                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.sound_on_finish ? 'bg-text-primary' : 'bg-brand-tertiary'
-                                )}
-                            >
-                                <div className={clsx(
-                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.sound_on_finish ? 'translate-x-7' : 'translate-x-1'
-                                )} />
-                            </button>
-                        </div>
+                        <SettingItem
+                            label="Shutdown when done"
+                            description="Shutdown the PC automatically after all active downloads are finished."
+                        >
+                            <SettingToggle
+                                enabled={settings.shutdown_on_finish}
+                                onToggle={() => handleChange("shutdown_on_finish", !settings.shutdown_on_finish)}
+                            />
+                        </SettingItem>
+
+                        <SettingItem
+                            label="Sound Notifications"
+                            description="Play a subtle sound when a download task completes."
+                        >
+                            <SettingToggle
+                                enabled={settings.sound_on_finish}
+                                onToggle={() => handleChange("sound_on_finish", !settings.sound_on_finish)}
+                            />
+                        </SettingItem>
 
                         <div className="pt-4 border-t border-brand-tertiary/20">
                             <h3 className="text-sm font-medium text-text-primary flex items-center gap-2 mb-4">
@@ -369,18 +376,10 @@ export function Settings() {
                                         <span className="text-sm font-medium text-text-primary tracking-tight">Enable Scheduler</span>
                                         <span className="text-xs text-text-tertiary">Automatically manage downloads based on time</span>
                                     </div>
-                                    <button
-                                        onClick={() => handleChange('scheduler_enabled', !settings.scheduler_enabled)}
-                                        className={clsx(
-                                            "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                            settings.scheduler_enabled ? 'bg-text-primary' : 'bg-brand-tertiary'
-                                        )}
-                                    >
-                                        <div className={clsx(
-                                            "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                            settings.scheduler_enabled ? 'translate-x-7' : 'translate-x-1'
-                                        )} />
-                                    </button>
+                                    <SettingToggle
+                                        enabled={settings.scheduler_enabled}
+                                        onToggle={() => handleChange('scheduler_enabled', !settings.scheduler_enabled)}
+                                    />
                                 </div>
 
                                 {settings.scheduler_enabled && (
@@ -412,43 +411,25 @@ export function Settings() {
             case "privacy":
                 return (
                     <div className="space-y-8 animate-fade-in">
-                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
-                            <div>
-                                <h4 className="text-base font-medium text-text-primary mb-1">Autocatch (Clipboard)</h4>
-                                <p className="text-xs text-text-tertiary">Automatically detect and prompt for URLs in your clipboard.</p>
-                            </div>
-                            <button
-                                onClick={() => handleChange("autocatch_enabled", !settings.autocatch_enabled)}
-                                className={clsx(
-                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.autocatch_enabled ? 'bg-text-primary' : 'bg-brand-tertiary'
-                                )}
-                            >
-                                <div className={clsx(
-                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.autocatch_enabled ? 'translate-x-7' : 'translate-x-1'
-                                )} />
-                            </button>
-                        </div>
+                        <SettingItem
+                            label="Autocatch (Clipboard)"
+                            description="Automatically detect and prompt for URLs in your clipboard."
+                        >
+                            <SettingToggle
+                                enabled={settings.autocatch_enabled}
+                                onToggle={() => handleChange("autocatch_enabled", !settings.autocatch_enabled)}
+                            />
+                        </SettingItem>
 
-                        <div className="flex items-center justify-between p-6 bg-brand-secondary border border-surface-border rounded-xl">
-                            <div>
-                                <h4 className="text-base font-medium text-text-primary mb-1">Force Encryption (PE)</h4>
-                                <p className="text-xs text-text-tertiary">Obfuscate torrent traffic to bypass ISP throttling. <span className="text-status-warning opacity-80">(Requires Restart)</span></p>
-                            </div>
-                            <button
-                                onClick={() => handleChange("torrent_encryption", !settings.torrent_encryption)}
-                                className={clsx(
-                                    "w-12 h-6 rounded-full transition-all duration-300 relative",
-                                    settings.torrent_encryption ? 'bg-text-primary' : 'bg-brand-tertiary'
-                                )}
-                            >
-                                <div className={clsx(
-                                    "absolute top-1 w-4 h-4 bg-brand-secondary rounded-full transition-transform duration-300",
-                                    settings.torrent_encryption ? 'translate-x-7' : 'translate-x-1'
-                                )} />
-                            </button>
-                        </div>
+                        <SettingItem
+                            label="Force Encryption (PE)"
+                            description="Obfuscate torrent traffic to bypass ISP throttling. (Requires Restart)"
+                        >
+                            <SettingToggle
+                                enabled={settings.torrent_encryption}
+                                onToggle={() => handleChange("torrent_encryption", !settings.torrent_encryption)}
+                            />
+                        </SettingItem>
                     </div>
                 );
             case "about":
@@ -573,6 +554,6 @@ export function Settings() {
                     {renderSectionContent()}
                 </div>
             </div>
-        </div>
+        </div >
     );
 }
