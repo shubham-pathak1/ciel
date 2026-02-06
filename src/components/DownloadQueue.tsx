@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useEffect, useCallback, memo } from "react";
-import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Video as VideoIcon, Database as DatabaseIcon, Check } from "lucide-react";
+import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Database as DatabaseIcon, Check } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
@@ -13,7 +13,6 @@ import clsx from "clsx";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ModalPortal } from "./ModalPortal";
 import { TorrentFileSelector } from "./TorrentFileSelector";
-import { VideoPreview } from "./VideoPreview";
 
 interface TorrentFile {
     name: string;
@@ -50,7 +49,7 @@ interface DownloadItem {
     speed: number;
     eta: number;
     connections: number;
-    protocol: "http" | "torrent" | "video";
+    protocol: "http" | "torrent";
     status: "downloading" | "paused" | "completed" | "queued" | "error";
     filepath: string;
     status_text?: string;
@@ -187,11 +186,23 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
             }
         });
 
+        // Listen for download errors (e.g., YouTube 403)
+        const unlistenError = listen<{ id: string; message: string }>("download-error", (event) => {
+            setDownloads((prev) =>
+                prev.map((d) =>
+                    d.id === event.payload.id
+                        ? { ...d, status: "error", status_text: event.payload.message }
+                        : d
+                )
+            );
+        });
+
         return () => {
             unlistenProgress.then((u) => u());
             unlistenCompleted.then((u) => u());
             unlistenName.then((u) => u());
             unlistenAutocatch.then((u) => u());
+            unlistenError.then((u) => u());
         };
     }, []);
 
@@ -456,7 +467,6 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
         };
 
         const ProtocolIcon = () => {
-            if (download.protocol === 'video') return <VideoIcon className={clsx("w-5 h-5", getStatusColor())} />;
             return <FileDown className={clsx("w-5 h-5", getStatusColor())} />;
         };
 
@@ -531,11 +541,18 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
 
                         <div className="flex items-center justify-between text-xs text-text-secondary mt-0.5">
                             <div className="flex items-center gap-3">
-                                {download.status_text && (download.status_text.includes("Initializing") || download.status_text.includes("Metadata") || download.status_text === "Paused" || download.status_text === "Resuming..." || download.status_text.includes("Connecting")) ? (
+                                {download.status === 'error' && download.status_text ? (
                                     <div className="flex items-center gap-2">
-                                        {download.status_text !== "Paused" && <div className="w-1.5 h-1.5 rounded-full bg-text-primary animate-pulse" />}
+                                        <span className="font-bold uppercase tracking-widest text-[9px] text-status-error">
+                                            {download.status_text}
+                                        </span>
+                                    </div>
+                                ) : download.status_text && (download.status_text.includes("Initializing") || download.status_text.includes("Metadata") || download.status_text === "Paused" || download.status_text === "Resuming..." || download.status_text.includes("Connecting") || download.status_text.includes("Oops")) ? (
+                                    <div className="flex items-center gap-2">
+                                        {download.status_text !== "Paused" && !download.status_text.includes("Oops") && <div className="w-1.5 h-1.5 rounded-full bg-text-primary animate-pulse" />}
                                         <span className={clsx("font-bold uppercase tracking-widest text-[9px]",
-                                            download.status_text === "Paused" ? "text-status-warning" : "text-white"
+                                            download.status_text === "Paused" ? "text-status-warning" :
+                                                download.status_text.includes("Oops") ? "text-status-error" : "text-white"
                                         )}>
                                             {download.status_text}
                                         </span>
@@ -646,7 +663,6 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     const [isAdding, setIsAdding] = useState(false);
     const [status, setStatus] = useState<string | null>(null);
     const [torrentInfo, setTorrentInfo] = useState<TorrentInfo | null>(null);
-    const [videoMetadata, setVideoMetadata] = useState<any | null>(null);
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [userAgent, setUserAgent] = useState("");
     const [cookies, setCookies] = useState("");
@@ -702,21 +718,6 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         setStatus("Analyzing...");
 
         try {
-            const isVideoSite = /youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|vimeo\.com|facebook\.com/.test(url);
-            if (isVideoSite) {
-                try {
-                    const metadata = await invoke("analyze_video_url", { url });
-                    setVideoMetadata(metadata);
-                    setStatus(null);
-                    return;
-                } catch (e) {
-                    console.warn("Video analysis failed", e);
-                    setStatus(`Video Analysis Failed: ${e}`);
-                    setIsAdding(false);
-                    return; // Stop here if it was meant to be a video
-                }
-            }
-
             const typeInfo = await invoke<any>("validate_url_type", { url });
             if (typeInfo.is_magnet) {
                 const info = await invoke<TorrentInfo>("analyze_torrent", { url });
@@ -743,26 +744,7 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         } catch (err) {
             setStatus(`Error: ${err}`);
         } finally {
-            if (!torrentInfo && !videoMetadata) setIsAdding(false);
-        }
-    };
-
-    const handleVideoDownload = async (formatId: string, ext: string, audioId?: string, totalSize?: number) => {
-        setIsAdding(true);
-        try {
-            const output_folder = await getSaveLocation();
-            if (output_folder === null) {
-                setIsAdding(false);
-                return;
-            }
-            const filename = `${videoMetadata.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
-            await invoke("add_video_download", { url, formatId, audioId, totalSize, filepath: filename, outputFolder: output_folder || null });
-            onAdded();
-            onClose();
-        } catch (err) {
-            setStatus(`Error: ${err}`);
-        } finally {
-            setIsAdding(false);
+            if (!torrentInfo) setIsAdding(false);
         }
     };
 
@@ -794,85 +776,77 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                         exit={{ opacity: 0, scale: 0.98 }}
                         className="bg-brand-secondary border border-surface-border w-full max-w-lg rounded-xl p-6 shadow-2xl relative text-left"
                     >
-                        <h2 className="text-lg font-semibold text-text-primary mb-1">
-                            {videoMetadata ? "Video Options" : "Add New Download"}
+                        <h2 className="text-xl font-bold tracking-tight text-text-primary mb-1">
+                            Add New Download
                         </h2>
                         <p className="text-text-secondary text-sm mb-6">
-                            {videoMetadata ? "Select quality." : "Enter a URL or Magnet link."}
+                            Enter a URL or Magnet link.
                         </p>
 
-                        {videoMetadata ? (
-                            <VideoPreview
-                                metadata={videoMetadata}
-                                onCancel={() => { setVideoMetadata(null); setIsAdding(false); }}
-                                onDownload={handleVideoDownload}
+                        <div className="space-y-4">
+                            <input
+                                autoFocus
+                                type="text"
+                                value={url}
+                                onChange={(e) => setUrl(e.target.value)}
+                                placeholder="https://..."
+                                className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
+                                onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
                             />
-                        ) : (
-                            <div className="space-y-4">
-                                <input
-                                    autoFocus
-                                    type="text"
-                                    value={url}
-                                    onChange={(e) => setUrl(e.target.value)}
-                                    placeholder="https://..."
-                                    className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
-                                    onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-                                />
 
-                                <div className="pt-2">
-                                    <button
-                                        onClick={() => setShowAdvanced(!showAdvanced)}
-                                        className="text-[10px] items-center gap-1.5 uppercase font-bold tracking-wider text-text-tertiary hover:text-text-secondary transition-colors inline-flex mb-3"
-                                    >
-                                        <div className={clsx("w-1 h-3 rounded-full bg-brand-tertiary", showAdvanced && "bg-text-secondary")} />
-                                        Advanced Settings
-                                    </button>
+                            <div className="pt-2">
+                                <button
+                                    onClick={() => setShowAdvanced(!showAdvanced)}
+                                    className="text-[10px] items-center gap-1.5 uppercase font-bold tracking-wider text-text-tertiary hover:text-text-secondary transition-colors inline-flex mb-3"
+                                >
+                                    <div className={clsx("w-1 h-3 rounded-full bg-brand-tertiary", showAdvanced && "bg-text-secondary")} />
+                                    Advanced Settings
+                                </button>
 
-                                    <AnimatePresence>
-                                        {showAdvanced && (
-                                            <motion.div
-                                                initial={{ height: 0, opacity: 0 }}
-                                                animate={{ height: "auto", opacity: 1 }}
-                                                exit={{ height: 0, opacity: 0 }}
-                                                className="overflow-hidden space-y-4"
-                                            >
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] text-text-tertiary ml-1 uppercase tracking-widest font-bold">User-Agent</label>
-                                                    <input
-                                                        type="text"
-                                                        value={userAgent}
-                                                        onChange={(e) => setUserAgent(e.target.value)}
-                                                        placeholder="Mozilla/5.0..."
-                                                        className="w-full bg-brand-primary border border-surface-border rounded-lg px-3 py-2 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-xs"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] text-text-tertiary ml-1 uppercase tracking-widest font-bold">Cookies (Raw String)</label>
-                                                    <textarea
-                                                        value={cookies}
-                                                        onChange={(e) => setCookies(e.target.value)}
-                                                        placeholder="session=...; _uid=..."
-                                                        className="w-full h-20 bg-brand-primary border border-surface-border rounded-lg px-3 py-2 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-xs resize-none"
-                                                    />
-                                                </div>
-                                            </motion.div>
-                                        )}
-                                    </AnimatePresence>
-                                </div>
-                                {status && (
-                                    <div className="text-xs p-3 rounded-lg bg-brand-tertiary text-text-secondary flex items-center gap-2">
-                                        <DatabaseIcon size={14} />
-                                        {status}
-                                    </div>
-                                )}
-                                <div className="flex justify-end gap-3 mt-8">
-                                    <button onClick={onClose} className="px-4 py-2 text-text-secondary text-sm" disabled={isAdding}>Cancel</button>
-                                    <button onClick={handleAdd} disabled={isAdding || !url} className="btn-primary text-sm">
-                                        {isAdding ? "Analyzing..." : "Add Download"}
-                                    </button>
-                                </div>
+                                <AnimatePresence>
+                                    {showAdvanced && (
+                                        <motion.div
+                                            initial={{ height: 0, opacity: 0 }}
+                                            animate={{ height: "auto", opacity: 1 }}
+                                            exit={{ height: 0, opacity: 0 }}
+                                            className="overflow-hidden space-y-4"
+                                        >
+                                            <div className="space-y-1">
+                                                <label className="text-[10px] text-text-tertiary ml-1 uppercase tracking-widest font-bold">User-Agent</label>
+                                                <input
+                                                    type="text"
+                                                    value={userAgent}
+                                                    onChange={(e) => setUserAgent(e.target.value)}
+                                                    placeholder="Mozilla/5.0..."
+                                                    className="w-full bg-brand-primary border border-surface-border rounded-lg px-3 py-2 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-xs"
+                                                />
+                                            </div>
+                                            <div className="space-y-1">
+                                                <label className="text-[10px] text-text-tertiary ml-1 uppercase tracking-widest font-bold">Cookies (Raw String)</label>
+                                                <textarea
+                                                    value={cookies}
+                                                    onChange={(e) => setCookies(e.target.value)}
+                                                    placeholder="session=...; _uid=..."
+                                                    className="w-full h-20 bg-brand-primary border border-surface-border rounded-lg px-3 py-2 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-xs resize-none"
+                                                />
+                                            </div>
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
                             </div>
-                        )}
+                            {status && (
+                                <div className="text-xs p-3 rounded-lg bg-brand-tertiary text-text-secondary flex items-center gap-2">
+                                    <DatabaseIcon size={14} />
+                                    {status}
+                                </div>
+                            )}
+                            <div className="flex justify-end gap-3 mt-8">
+                                <button onClick={onClose} className="px-4 py-2 text-text-secondary text-sm" disabled={isAdding}>Cancel</button>
+                                <button onClick={handleAdd} disabled={isAdding || !url} className="btn-primary text-sm">
+                                    {isAdding ? "Analyzing..." : "Add Download"}
+                                </button>
+                            </div>
+                        </div>
                     </motion.div>
                 </div>
             </ModalPortal>

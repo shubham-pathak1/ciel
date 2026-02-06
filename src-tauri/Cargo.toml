@@ -37,6 +37,7 @@ arboard = "3"
 tauri-plugin-notification = "2.3.3"
 hex = "0.4.3"
 data-encoding = "2.10.0"
+dirs = "6.0.0"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.5"

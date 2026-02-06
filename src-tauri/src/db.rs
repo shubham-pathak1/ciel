@@ -229,6 +229,7 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('category_filter', 'All'),
             ('max_retries', '5'),
             ('retry_delay', '5'),
+            ('cookie_browser', 'none'),
             ('ask_location', 'false');
         "
     )?;

@@ -17,7 +17,6 @@ pub mod commands;
 pub mod db;
 pub mod downloader;
 mod torrent;
-mod video;
 mod scheduler;
 pub mod clipboard;
 pub mod tray;
@@ -107,8 +106,6 @@ pub fn run() {
             commands::add_download,
             commands::add_torrent,
             commands::analyze_torrent,
-            video::analyze_video_url,
-            video::add_video_download,
             commands::validate_url_type,
             commands::start_selective_torrent,
             commands::pause_download,

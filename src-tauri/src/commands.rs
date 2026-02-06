@@ -750,9 +750,6 @@ pub async fn resume_download(
                 ).await?;
             }
         }
-        DownloadProtocol::Video => {
-            crate::video::start_video_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
-        }
         _ => {
             start_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
         }
