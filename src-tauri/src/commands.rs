@@ -785,22 +785,17 @@ pub async fn delete_download(
     id: String,
     delete_files: bool,
 ) -> Result<(), String> {
-    println!("Deleting download ID: {}, delete_files: {}. DB Path: {}", id, delete_files, &db_state.path);
-    
     // 1. Get record first to know protocol and hash
     let downloads = db::get_all_downloads(&db_state.path).map_err(|e| e.to_string())?;
     let download_opt = downloads.into_iter().find(|d| d.id == id);
 
     if let Some(download) = download_opt {
-        println!("Found record: {}. Protocol: {:?}", id, download.protocol);
-        
         // 2. Clear from DB FIRST to ensure it doesn't "ghost" back into the UI.
         // This makes the deletion feel instant to the user.
         db::delete_download_by_id(&db_state.path, &id).map_err(|e| {
-            println!("CRITICAL: Failed to delete DB record for {}: {}", id, e);
+            eprintln!("Failed to delete DB record for {}: {}", id, e);
             e.to_string()
         })?;
-        println!("DB record removed successfully for ID: {}", id);
 
         // 3. Cleanup Engine (Fire-and-forget in a background task)
         // This prevents hangs in the engine (e.g. searching for missing files) from blocking the UI.
@@ -809,7 +804,6 @@ pub async fn delete_download(
         
         tokio::spawn(async move {
             if download.protocol == DownloadProtocol::Torrent {
-                println!("Background engine cleanup for torrent: {}", id);
                 let _ = tm.delete_torrent(&id, delete_files, Some(download.filepath.clone())).await;
                 if let Some(hash) = download.info_hash {
                     let _ = tm.delete_torrent_by_hash(hash, delete_files).await;
@@ -817,13 +811,11 @@ pub async fn delete_download(
                     let _ = tm.delete_torrent_by_hash(hash, delete_files).await;
                 }
             } else {
-                println!("Background engine cleanup for HTTP: {}", id);
                 m.cancel(&id).await;
             }
-            println!("Background cleanup finished for ID: {}", id);
         });
     } else {
-        println!("No DB record found for {}, attempting blind engine purge.", id);
+        // No DB record found, attempt blind engine purge
         let tm = torrent_manager.inner().clone();
         tokio::spawn(async move {
             let _ = tm.delete_torrent(&id, delete_files, None).await;

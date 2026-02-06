@@ -20,7 +20,6 @@ export function TitleBar() {
     const appWindow = getCurrentWindow();
 
     const handleMinimize = async () => {
-        console.log("Minimize clicked");
         try {
             await appWindow.minimize();
         } catch (e) {
@@ -29,7 +28,6 @@ export function TitleBar() {
     };
 
     const handleMaximize = async () => {
-        console.log("Maximize clicked");
         try {
             await appWindow.toggleMaximize();
         } catch (e) {
@@ -38,7 +36,6 @@ export function TitleBar() {
     };
 
     const handleClose = async () => {
-        console.log("Close clicked");
         try {
             await appWindow.close();
         } catch (e) {

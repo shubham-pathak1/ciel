@@ -76,7 +76,6 @@ impl TorrentManager {
         // This ensures we start fresh even if librqbit has persisted session state.
         if let Some(magnet_hash) = Self::extract_info_hash_from_magnet(&magnet) {
             // Force a deep purge by hash before adding
-            println!("Proactive cleanup for ghost: {}", magnet_hash);
             let _ = self.delete_torrent_by_hash(magnet_hash.clone(), false).await;
         }
         
@@ -503,7 +502,6 @@ impl TorrentManager {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 let path_obj = std::path::Path::new(&path);
                 if path_obj.exists() {
-                    println!("Torrent engine residue found at {}, forcing manual removal.", path);
                     if path_obj.is_dir() {
                         let _ = std::fs::remove_dir_all(path_obj);
                     } else {
