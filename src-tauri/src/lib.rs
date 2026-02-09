@@ -12,7 +12,6 @@
 //! - **Video (`video`)**: Specialized handling for YouTube and other video platforms.
 //! - **Tray (`tray`) & Clipboard (`clipboard`)**: OS-level integrations for better UX.
 
-pub mod bin_resolver;
 pub mod commands;
 pub mod db;
 pub mod downloader;
@@ -35,6 +34,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = app
+                .get_webview_window("main")
+                .expect("no main window")
+                .set_focus();
+        }))
         .setup(|app| {
             // DATABASE INITIALIZATION
             // We resolve the app data directory to store the SQLite database.

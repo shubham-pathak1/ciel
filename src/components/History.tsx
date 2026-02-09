@@ -7,6 +7,8 @@ import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Search, Trash2, ExternalLink, Calendar, Database, File } from 'lucide-react';
 import clsx from 'clsx';
+import { ConfirmDialog } from './ConfirmDialog';
+import { AnimatePresence } from 'framer-motion';
 
 /**
  * Represents a historical download record.
@@ -33,6 +35,10 @@ export const History: React.FC = () => {
     const [history, setHistory] = useState<HistoryItem[]>([]);
     const [search, setSearch] = useState('');
     const [isLoading, setIsLoading] = useState(true);
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+    const [deleteFiles, setDeleteFiles] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
 
     useEffect(() => {
         fetchHistory();
@@ -50,14 +56,25 @@ export const History: React.FC = () => {
         }
     };
 
-    const handleDelete = async (id: string, e: React.MouseEvent) => {
+    const handleDeleteClick = (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
+        setSelectedItemId(id);
+        setShowDeleteConfirm(true);
+    };
+
+    const performDelete = async () => {
+        if (!selectedItemId) return;
+        setIsDeleting(true);
         try {
-            await invoke("delete_download", { id, deleteFiles: false });
-            setHistory(prev => prev.filter(item => item.id !== id));
+            await invoke("delete_download", { id: selectedItemId, deleteFiles: deleteFiles });
+            setHistory(prev => prev.filter(item => item.id !== selectedItemId));
+            setShowDeleteConfirm(false);
         } catch (err) {
-            alert(`DEBUG [History]: delete_download error: ${err}`);
+            alert(`Delete failed: ${err}`);
             console.error("Failed to delete history item:", err);
+        } finally {
+            setIsDeleting(false);
+            setSelectedItemId(null);
         }
     };
 
@@ -82,7 +99,7 @@ export const History: React.FC = () => {
     );
 
     return (
-        <div className="h-full flex flex-col w-full max-w-5xl mx-auto">
+        <div className="h-full flex flex-col w-full max-w-5xl mx-auto p-4 sm:p-6 lg:p-8">
             {/* Header */}
             <div className="flex items-end justify-between mb-8 sticky top-0 bg-brand-primary z-20 py-4 border-b border-transparent">
                 <div>
@@ -176,7 +193,7 @@ export const History: React.FC = () => {
                                                 <ExternalLink className="w-4 h-4" />
                                             </button>
                                             <button
-                                                onClick={(e) => handleDelete(item.id, e)}
+                                                onClick={(e) => handleDeleteClick(item.id, e)}
                                                 title="Delete Record"
                                                 className="p-2 rounded-lg hover:bg-brand-tertiary text-text-secondary hover:text-status-error transition-all"
                                             >
@@ -190,6 +207,21 @@ export const History: React.FC = () => {
                     )}
                 </div>
             </div>
+
+            <AnimatePresence>
+                <ConfirmDialog
+                    isOpen={showDeleteConfirm}
+                    onClose={() => setShowDeleteConfirm(false)}
+                    onConfirm={performDelete}
+                    title="Remove from History?"
+                    message="Are you sure you want to remove this record? You can also optionally delete the file from your disk."
+                    confirmText="Remove"
+                    showCheckbox={true}
+                    checkboxChecked={deleteFiles}
+                    onCheckboxChange={setDeleteFiles}
+                    isLoading={isDeleting}
+                />
+            </AnimatePresence>
         </div>
     );
 };

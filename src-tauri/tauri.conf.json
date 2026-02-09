@@ -50,7 +50,7 @@
                 "headerImage": "../src/assets/header_fixed.bmp",
                 "sidebarImage": "../src/assets/sidebar_fixed.bmp",
                 "installerHooks": "installer.nsh",
-                "installMode": "both",
+                "installMode": "currentUser",
                 "languages": [
                     "English"
                 ],
@@ -64,6 +64,7 @@
     "plugins": {
         "shell": {
             "open": true
-        }
+        },
+        "single-instance": null
     }
 }

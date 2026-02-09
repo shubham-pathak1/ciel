@@ -2,7 +2,7 @@ use librqbit::{Session, AddTorrent, ManagedTorrent};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use serde::{Serialize, Deserialize};
 use hex;
 
@@ -67,9 +67,18 @@ impl TorrentManager {
             }
         }
     }
+    
+    /// Calculates aggregate torrent statistics for the system tray (count only for now).
+    pub async fn get_global_status(&self) -> (usize, u64) {
+        let active = self.active_torrents.lock().await;
+        let count = active.len();
+        // Speed calculation for torrents is complex to aggregate here without a cache.
+        // We'll return 0 for now to fix the build, and I'll add real tracking in a follow-up.
+        (count, 0)
+    }
 
     /// Adds a new magnet link or torrent file to the active session.
-    pub async fn add_magnet(&self, app: AppHandle, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>, total_size: u64, is_resume: bool) -> Result<(), String> {
+    pub async fn add_magnet<R: Runtime>(&self, app: AppHandle<R>, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>, total_size: u64, is_resume: bool) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active (port conflict or initialization error)")?;
         
         // PROACTIVE GHOST CLEANUP: Delete any existing torrent with the same info hash before adding.

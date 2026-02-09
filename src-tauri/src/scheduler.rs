@@ -5,7 +5,7 @@
 //! ISP bandwidth).
 
 use std::time::Duration;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 use crate::db;
 use crate::commands::{self, DownloadManager};
 use crate::torrent::TorrentManager;
@@ -56,7 +56,7 @@ pub fn start_scheduler(app: AppHandle) {
 }
 
 /// Helper: Resumes all Paused or Queued downloads in the database.
-async fn resume_all_downloads(app: &AppHandle) {
+pub async fn resume_all_downloads<R: Runtime>(app: &AppHandle<R>) {
     let db_state = app.state::<db::DbState>();
     let manager = app.state::<DownloadManager>();
     let torrent_manager = app.state::<TorrentManager>();
@@ -77,7 +77,7 @@ async fn resume_all_downloads(app: &AppHandle) {
 }
 
 /// Helper: Pauses all currently active transfers.
-async fn pause_all_downloads(app: &AppHandle) {
+pub async fn pause_all_downloads<R: Runtime>(app: &AppHandle<R>) {
     let db_state = app.state::<db::DbState>();
     let manager = app.state::<DownloadManager>();
     let torrent_manager = app.state::<TorrentManager>();

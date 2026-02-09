@@ -4,7 +4,7 @@ use crate::torrent::TorrentManager;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use rookie;
@@ -19,8 +19,8 @@ use tauri_plugin_notification::NotificationExt;
 /// to send cancellation signals to specific download tasks via `mpsc` channels.
 #[derive(Clone)]
 pub struct DownloadManager {
-    /// Internal map linking Download IDs to their respective cancellation senders.
-    active_downloads: Arc<Mutex<HashMap<String, mpsc::Sender<()>>>>,
+    /// Internal map linking Download IDs to their respective cancellation senders and progress monitors.
+    active_downloads: Arc<Mutex<HashMap<String, (mpsc::Sender<()>, Arc<std::sync::Mutex<crate::downloader::DownloadProgress>>)>>>,
 }
 
 impl DownloadManager {
@@ -31,9 +31,9 @@ impl DownloadManager {
     }
 
     /// Registers a new active download and its cancellation hook.
-    pub async fn add_active(&self, id: String, cancel_tx: mpsc::Sender<()>) {
+    pub async fn add_active(&self, id: String, cancel_tx: mpsc::Sender<()>, progress: Arc<std::sync::Mutex<crate::downloader::DownloadProgress>>) {
         let mut active = self.active_downloads.lock().await;
-        active.insert(id, cancel_tx);
+        active.insert(id, (cancel_tx, progress));
     }
 
     /// Unregisters a download, typically called after a successful completion or an error.
@@ -45,7 +45,7 @@ impl DownloadManager {
     /// Signals an active download task to abort immediately.
     pub async fn cancel(&self, id: &str) {
         let mut active = self.active_downloads.lock().await;
-        if let Some(tx) = active.get(id) {
+        if let Some((tx, _)) = active.get(id) {
             // Signal the async task to stop.
             let _ = tx.send(()).await;
         }
@@ -54,6 +54,21 @@ impl DownloadManager {
 
     pub async fn is_active(&self, id: &str) -> bool {
         self.active_downloads.lock().await.contains_key(id)
+    }
+
+    /// Calculates aggregate download statistics for the system tray.
+    pub async fn get_global_status(&self) -> (usize, u64) {
+        let active = self.active_downloads.lock().await;
+        let mut total_speed = 0;
+        let count = active.len();
+        
+        for (_, (_, progress)) in active.iter() {
+            if let Ok(p) = progress.lock() {
+                total_speed += p.speed;
+            }
+        }
+        
+        (count, total_speed)
     }
 }
 
@@ -154,7 +169,6 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
 
     // Special check for Google Drive: if it's returning HTML, it's likely the "virus scan" warning or login page.
     if url.contains("drive.google.com/uc") && content_type.as_ref().map(|s| s.contains("text/html")).unwrap_or(false) {
-        println!("[Drive] Warning page detected, attempting to scrape confirm token...");
         // Optimization: Try to find a confirm token in the HTML body if confirm=t failed.
         // We need to fetch the FULL body, so we retry without the Range header.
         if let Ok(full_res) = client.get(&url).send().await {
@@ -184,7 +198,6 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
             // 3. Loop Prevention: If we only found 't' and we already had it, or we found nothing new
             if let Some(ref token) = found_token {
                 if token == "t" && url.contains("confirm=t") {
-                    println!("[Drive] Token is still 't', bypass failed (likely missing authorized session).");
                     found_token = None; // Stop recursion
                 }
             }
@@ -203,7 +216,6 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
                     }
                 }
                 
-                println!("[Drive] Scraped token and uuid, retrying...");
                 return Box::pin(validate_url_type(db_state, new_url)).await;
             }
 
@@ -274,7 +286,7 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
 /// - Absolute vs Relative paths.
 /// - System-specific "Downloads" folder fallback.
 /// - Custom user-defined download directories.
-pub(crate) fn resolve_download_path(app: &tauri::AppHandle, db_path: &str, provided_path: &str, override_folder: Option<String>) -> String {
+pub(crate) fn resolve_download_path<R: Runtime>(app: &tauri::AppHandle<R>, db_path: &str, provided_path: &str, override_folder: Option<String>) -> String {
     let p = Path::new(provided_path);
     if p.is_absolute() {
         return provided_path.to_string();
@@ -393,7 +405,7 @@ pub fn get_category_from_filename(filename: &str) -> String {
 /// Triggers post-transfer logic like opening the target folder or system power management.
 /// 
 /// This is called automatically when a download transitions to the 'Completed' status.
-pub (crate) async fn execute_post_download_actions(app: AppHandle, db_path: String, download: Download) {
+pub (crate) async fn execute_post_download_actions<R: Runtime>(app: AppHandle<R>, db_path: String, download: Download) {
     // 1. Open Folder on Finish
     let open_folder = db::get_setting(&db_path, "open_folder_on_finish")
         .ok()
@@ -462,8 +474,8 @@ pub fn get_downloads(db_state: State<DbState>) -> Result<Vec<Download>, String> 
 /// 3. Persists the record to the database.
 /// 4. Dispatches the async download task.
 #[tauri::command]
-pub async fn add_download(
-    app: AppHandle,
+pub async fn add_download<R: Runtime>(
+    app: AppHandle<R>,
     db_state: State<'_, DbState>,
     manager: State<'_, DownloadManager>,
     url: String,
@@ -493,7 +505,12 @@ pub async fn add_download(
     
     // Streamline: No synchronous sniffing here. 
     // The Downloader will handle metadata discovery in the background to prevent UI lag.
-    let mut filename = filename;
+    let mut filename = if let Ok(decoded) = percent_encoding::percent_decode(filename.as_bytes()).decode_utf8() {
+        decoded.into_owned()
+    } else {
+        filename
+    };
+
     if filename.is_empty() {
         filename = "download_file".to_string();
     }
@@ -546,8 +563,8 @@ pub async fn add_download(
 ///   a dedicated sub-folder to prevent file/hash collisions.
 /// - Registration with the `TorrentManager`.
 #[tauri::command]
-pub async fn add_torrent(
-    app: AppHandle,
+pub async fn add_torrent<R: Runtime>(
+    app: AppHandle<R>,
     db_state: State<'_, DbState>,
     torrent_manager: State<'_, TorrentManager>,
     url: String, // Magnet link or local file path
@@ -657,8 +674,8 @@ pub async fn start_selective_torrent(
 /// - Graceful cancellation handling.
 /// - Database persistence of progress and final status.
 /// - OS-level notifications on completion/failure.
-async fn start_download_task(
-    app: AppHandle,
+async fn start_download_task<R: Runtime>(
+    app: AppHandle<R>,
     db_path: String,
     manager: DownloadManager,
     download: Download,
@@ -673,8 +690,6 @@ async fn start_download_task(
     let (tx, mut rx) = mpsc::channel(1);
     let is_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     
-    manager.add_active(id.clone(), tx).await;
-
     // Fetch global speed limit
     let speed_limit = db::get_setting(&db_path, "speed_limit")
         .ok()
@@ -713,6 +728,9 @@ async fn start_download_task(
         let downloader = Downloader::new(config)
             .with_db(db_path.clone())
             .with_cancel_signal(is_cancelled.clone()); // Pass signal
+
+        let progress_obj = downloader.get_progress();
+        manager.add_active(id.clone(), tx, progress_obj.clone()).await;
 
         let id_inner = id.clone();
         let db_path_inner = db_path.clone();
@@ -786,8 +804,8 @@ async fn start_download_task(
 /// For HTTP, it signals the worker to stop. For Torrents, it communicates
 /// directly with the `librqbit` session.
 #[tauri::command]
-pub async fn pause_download(
-    app: AppHandle,
+pub async fn pause_download<R: Runtime>(
+    app: AppHandle<R>,
     db_state: State<'_, DbState>,
     manager: State<'_, DownloadManager>,
     torrent_manager: State<'_, TorrentManager>,
@@ -825,8 +843,8 @@ pub async fn pause_download(
 
 /// Bridge: Resumes a previously paused transfer.
 #[tauri::command]
-pub async fn resume_download(
-    app: AppHandle,
+pub async fn resume_download<R: Runtime>(
+    app: AppHandle<R>,
     db_state: State<'_, DbState>,
     manager: State<'_, DownloadManager>,
     torrent_manager: State<'_, TorrentManager>,
@@ -952,6 +970,11 @@ pub async fn delete_download(
                 }
             } else {
                 m.cancel(&id).await;
+                if delete_files {
+                    // Slight delay to ensure Downloader has flushed and closed the file handle
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    let _ = std::fs::remove_file(&download.filepath);
+                }
             }
         });
     } else {
@@ -979,7 +1002,7 @@ pub fn update_setting(db_state: State<DbState>, key: String, value: String) -> R
 
 /// Bridge: Opens the OS file explorer and focuses the downloaded file/folder.
 #[tauri::command]
-pub fn show_in_folder(app: AppHandle, db_state: State<'_, DbState>, path: String) -> Result<(), String> {
+pub fn show_in_folder<R: Runtime>(app: AppHandle<R>, db_state: State<'_, DbState>, path: String) -> Result<(), String> {
     show_in_folder_internal(app, &db_state.path, path)
 }
 
@@ -988,7 +1011,7 @@ pub fn show_in_folder(app: AppHandle, db_state: State<'_, DbState>, path: String
 /// - Windows: Uses `explorer.exe /select` to highlight the file.
 /// - MacOS: Uses `open -R`.
 /// - Linux: Uses `xdg-open` on the parent folder.
-pub fn show_in_folder_internal(app: AppHandle, db_path: &str, path: String) -> Result<(), String> {
+pub fn show_in_folder_internal<R: Runtime>(app: AppHandle<R>, db_path: &str, path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let path_norm = path.replace("/", "\\");

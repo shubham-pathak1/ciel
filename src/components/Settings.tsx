@@ -234,33 +234,65 @@ export function Settings() {
                     </div>
                 );
             case "network":
-                const limitValues = [0, 102400, 512000, 1048576, 2097152, 5242880, 10485760, 26214400, 52428800, 104857600];
-                const formatLimit = (bytes: string) => {
-                    const b = parseInt(bytes);
-                    if (b === 0) return "Unlimited";
-                    if (b < 1048576) return `${(b / 1024).toFixed(0)} KB/s`;
-                    return `${(b / 1048576).toFixed(0)} MB/s`;
+                const displayLimit = (() => {
+                    const b = parseInt(settings.speed_limit);
+                    if (b === 0) return { val: "", unit: "MB/s" };
+                    if (b < 1048576) return { val: (b / 1024).toFixed(0), unit: "KB/s" };
+                    return { val: (b / 1048576).toFixed(0), unit: "MB/s" };
+                })();
+
+                const handleSpeedChange = (val: string, unit: string) => {
+                    if (val === "" || parseInt(val) <= 0) {
+                        handleChange("speed_limit", "0");
+                        return;
+                    }
+                    const num = parseInt(val);
+                    const multiplier = unit === "KB/s" ? 1024 : 1048576;
+                    handleChange("speed_limit", (num * multiplier).toString());
                 };
 
                 return (
                     <div className="space-y-8 animate-fade-in">
                         <div className="space-y-4">
-                            <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Global Speed Limit</label>
-                            <div className="flex items-center gap-4">
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max={limitValues.length - 1}
-                                    step="1"
-                                    value={limitValues.indexOf(limitValues.find(v => v >= parseInt(settings.speed_limit)) ?? 0)}
-                                    onChange={(e) => handleChange("speed_limit", limitValues[parseInt(e.target.value)].toString())}
-                                    className="flex-1 h-2 bg-brand-tertiary rounded-lg appearance-none cursor-pointer accent-text-primary"
-                                />
-                                <div className="w-24 h-10 flex items-center justify-center bg-brand-secondary rounded-lg border border-surface-border text-text-primary font-bold font-mono text-xs whitespace-nowrap">
-                                    {formatLimit(settings.speed_limit)}
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Global Speed Limit</label>
+                                <div className="group relative">
+                                    <Info size={14} className="text-text-tertiary cursor-help hover:text-text-primary transition-colors" />
+                                    <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-64 p-3 bg-brand-tertiary border border-surface-border rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-30 text-[10px] leading-relaxed text-text-secondary">
+                                        For limits below <span className="text-text-primary font-bold">2MB/s</span>, Ciel automatically reduces connections to keep flows healthy and avoid Google Drive resets.
+                                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 border-8 border-transparent border-b-brand-tertiary"></div>
+                                    </div>
                                 </div>
                             </div>
-                            <p className="text-xs text-text-tertiary font-medium">Limits total download bandwidth across all active tasks.</p>
+
+                            <div className="flex items-center gap-3">
+                                <div className="flex-1 flex gap-2">
+                                    <input
+                                        type="number"
+                                        placeholder="0 (Unlimited)"
+                                        value={displayLimit.val}
+                                        onChange={(e) => handleSpeedChange(e.target.value, displayLimit.unit)}
+                                        className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-2.5 text-sm text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono"
+                                    />
+                                    <select
+                                        value={displayLimit.unit}
+                                        onChange={(e) => handleSpeedChange(displayLimit.val, e.target.value)}
+                                        className="bg-brand-secondary border border-surface-border rounded-lg px-3 py-2 text-xs text-text-primary focus:outline-none focus:border-text-secondary transition-all cursor-pointer"
+                                    >
+                                        <option value="KB/s">KB/s</option>
+                                        <option value="MB/s">MB/s</option>
+                                    </select>
+                                </div>
+                                {settings.speed_limit !== "0" && (
+                                    <button
+                                        onClick={() => handleChange("speed_limit", "0")}
+                                        className="px-4 py-2.5 bg-brand-tertiary hover:bg-brand-tertiary/80 text-text-tertiary hover:text-text-primary text-xs font-medium rounded-lg border border-surface-border transition-all"
+                                    >
+                                        Clear
+                                    </button>
+                                )}
+                            </div>
+                            <p className="text-xs text-text-tertiary font-medium">Limits total download bandwidth. Set to 0 for unlimited speed.</p>
                         </div>
 
                         <div className="text-center py-6 border-t border-surface-border mt-8">
@@ -289,7 +321,16 @@ export function Settings() {
                         )}
 
                         <div className="space-y-4">
-                            <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Concurrent Connections</label>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Concurrent Connections</label>
+                                <div className="group relative">
+                                    <Info size={14} className="text-text-tertiary cursor-help hover:text-text-primary transition-colors" />
+                                    <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-64 p-3 bg-brand-tertiary border border-surface-border rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-30 text-[10px] leading-relaxed text-text-secondary">
+                                        Google and many other servers might rate limit you. The <span className="text-text-primary font-bold">sweet/safe spot</span> for concurrent connections is <span className="text-text-primary font-bold">8-16</span>.
+                                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 border-8 border-transparent border-b-brand-tertiary"></div>
+                                    </div>
+                                </div>
+                            </div>
                             <div className="flex items-center gap-4">
                                 <input
                                     type="range"
@@ -480,13 +521,13 @@ export function Settings() {
                         </SettingItem>
 
                         <SettingItem
-                            label="Force Encryption (PE)"
-                            description="Obfuscate torrent traffic to bypass throttling."
+                            label="Torrent Encryption"
+                            description="Ciel currently uses the librqbit engine for Protocol Encryption(PE), for more privacy and security please use a VPN."
                         >
-                            <SettingToggle
-                                enabled={settings.torrent_encryption}
-                                onToggle={() => handleChange("torrent_encryption", !settings.torrent_encryption)}
-                            />
+                            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-text-primary/5 border border-text-primary/10 text-text-secondary text-[10px] font-medium">
+                                <Shield size={10} className="text-text-primary" />
+                                <span>AUTOMATED</span>
+                            </div>
                         </SettingItem>
                     </div>
                 );

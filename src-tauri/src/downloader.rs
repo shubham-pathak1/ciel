@@ -9,9 +9,78 @@ use std::io::Read;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncWriteExt, AsyncSeekExt, BufWriter};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
 
-/// Represents errors that can occur during an HTTP transfer.
+/// A shared token-bucket rate limiter to coordinate multiple download workers.
+/// 
+/// This is based on the logic used by high-performance download managers like IDM/FDM.
+/// Instead of each worker throttling itself, they consume from a central pool.
+/// This ensures the aggregate speed stays exactly at the limit without causing 
+/// bursty traffic that could trigger server-side TCP resets or "Slow Consumer" errors.
+pub struct SharedRateLimiter {
+    limit: u64, // bytes per second
+    tokens: AtomicU64,
+    last_update: std::sync::Mutex<std::time::Instant>,
+}
+
+impl SharedRateLimiter {
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            tokens: AtomicU64::new(limit), // Start with a full bucket (1s burst)
+            last_update: std::sync::Mutex::new(std::time::Instant::now()),
+        }
+    }
+
+    /// Consumes tokens from the bucket. If not enough tokens are available, it sleeps.
+    /// 
+    /// To keep the stream "hot" and responsive, we process acquisitions in small increments.
+    /// This also prevents deadlocks where a single received chunk is larger than the 1s burst cap.
+    pub async fn acquire(&self, amount: u64, cancel_signal: &Option<Arc<AtomicBool>>) {
+        if self.limit == 0 { return; }
+
+        let mut remaining = amount;
+        while remaining > 0 {
+            if let Some(sig) = cancel_signal {
+                if sig.load(Ordering::Relaxed) { return; }
+            }
+
+            // 1. Refill tokens based on elapsed time
+            {
+                let mut last_update = self.last_update.lock().unwrap();
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(*last_update).as_secs_f64();
+                
+                // Refill every 10ms for even higher frequency pacing
+                if elapsed >= 0.01 {
+                    let refill = (self.limit as f64 * elapsed) as u64;
+                    if refill > 0 {
+                        let current = self.tokens.load(Ordering::Relaxed);
+                        // Cap at 1s worth of tokens to prevent huge bursts after pauses
+                        let new_tokens = (current + refill).min(self.limit);
+                        self.tokens.store(new_tokens, Ordering::Relaxed);
+                        *last_update = now;
+                    }
+                }
+            }
+
+            // 2. Try to consume what we can
+            let current = self.tokens.load(Ordering::Relaxed);
+            if current > 0 {
+                let take = remaining.min(current);
+                if self.tokens.compare_exchange(current, current - take, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                    remaining -= take;
+                    if remaining == 0 { break; }
+                }
+            }
+
+            // 3. Not enough tokens, wait a tiny bit
+            if remaining > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+}
 #[derive(Error, Debug, Clone, Serialize)]
 pub enum DownloadError {
     /// Failure during network request or response streaming.
@@ -138,6 +207,7 @@ pub struct Downloader {
     db_path: Option<String>,
     cancel_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
     last_emit: Arc<AtomicU64>,
+    rate_limiter: Option<Arc<SharedRateLimiter>>,
 }
 
 impl Downloader {
@@ -155,8 +225,8 @@ impl Downloader {
         }));
 
         let mut builder = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .pool_max_idle_per_host(8)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_max_idle_per_host(32)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
             .tcp_nodelay(true);
@@ -178,6 +248,8 @@ impl Downloader {
 
         let client = builder.build().unwrap_or_default();
 
+        let speed_limit = config.speed_limit;
+
         Self {
             client,
             config,
@@ -186,6 +258,11 @@ impl Downloader {
             db_path: None,
             cancel_signal: None,
             last_emit: Arc::new(AtomicU64::new(0)),
+            rate_limiter: if speed_limit > 0 {
+                Some(Arc::new(SharedRateLimiter::new(speed_limit)))
+            } else {
+                None
+            },
         }
     }
 
@@ -242,6 +319,7 @@ impl Downloader {
             p.status_text = Some("Initializing...".to_string());
             p
         });
+        
 
         // Optimization 1: If user only requested 1 connection, skip the HEAD check and go straight to GET.
         // This avoids one round-trip and significantly speeds up "rust-style" performance.
@@ -301,17 +379,38 @@ impl Downloader {
             let mut db_chunks_to_insert = Vec::new();
 
             for i in 0..num_chunks {
-                let start = i * chunk_size;
+                let mut start = i * chunk_size;
                 let end = if i == num_chunks - 1 {
                     total_size - 1
                 } else {
                     (i + 1) * chunk_size - 1
                 };
+
+                // Cap individual chunks at 10MB to prevent single long requests when throttled.
+                // This ensures that even on slow connections, we keep cycling through requests and updating DB.
+                let max_chunk = 10 * 1024 * 1024;
+                while (end - start + 1) > max_chunk {
+                    let sub_end = start + max_chunk - 1;
+                    chunks.push(WorkChunk {
+                        start,
+                        end: sub_end,
+                        downloaded: 0,
+                        _index: chunks.len(),
+                    });
+                    db_chunks_to_insert.push(ChunkRecord {
+                        download_id: self.config.id.clone(),
+                        start: start as i64,
+                        end: sub_end as i64,
+                        downloaded: 0,
+                    });
+                    start += max_chunk;
+                }
+
                 chunks.push(WorkChunk {
                     start,
                     end,
                     downloaded: 0,
-                    _index: i as usize,
+                    _index: chunks.len(),
                 });
                 db_chunks_to_insert.push(ChunkRecord {
                     download_id: self.config.id.clone(),
@@ -351,9 +450,19 @@ impl Downloader {
         let pending_chunks = Arc::new(std::sync::Mutex::new(chunks.into_iter().filter(|c| c.downloaded < (c.end - c.start + 1)).collect::<Vec<_>>()));
         let active_workers = Arc::new(std::sync::Mutex::new(0u8));
         let max_workers = self.config.connections;
-
-        // Start with full power immediately
-        let current_target_workers = max_workers;
+        // Start with full power immediately, but cap workers if speed limit is too low
+        // Rule: Each connection should ideally have ~256 KB/s to prevent "Slow Consumer" resets
+        let mut current_target_workers = max_workers;
+        if self.config.speed_limit > 0 {
+            let min_speed_per_worker = 512 * 1024; // 512 KB/s
+            let calculated_max = (self.config.speed_limit / min_speed_per_worker) as u8;
+            current_target_workers = current_target_workers.min(calculated_max.max(1));
+            
+            if current_target_workers < max_workers {
+                println!("[{}] Speed limit is low ({} bytes/s). Scaling down to {} workers for stability.", 
+                    self.config.id, self.config.speed_limit, current_target_workers);
+            }
+        }
         
         // Channel to signal worker completion or scaling
         let (worker_tx, mut worker_rx) = mpsc::channel::<()>(32);
@@ -391,22 +500,51 @@ impl Downloader {
                 let cancel_signal = self.cancel_signal.clone();
                 let last_emit_clone = self.last_emit.clone();
                 let speed_state_clone = speed_state.clone();
-                let global_speed_limit = self.config.speed_limit;
-                let num_connections = self.config.connections;
+                let rate_limiter = self.rate_limiter.clone();
 
                 *active_workers.lock().unwrap() += 1;
                 current_active += 1;
 
                 tokio::spawn(async move {
+                    let rate_limiter = rate_limiter;
+                    let last_emit_clone = last_emit_clone;
+                    let speed_state_clone = speed_state_clone;
+                    let mut chunk = chunk;
                     let mut attempts = 0;
-                    let max_retries = 3;
+                    let max_retries = 10;
                     let mut final_error = None;
                     
-                    loop {
+                    'worker_mission: loop {
                         if let Some(sig) = &cancel_signal {
-                            if sig.load(Ordering::Relaxed) { break; }
+                            if sig.load(Ordering::Relaxed) { 
+                                break; 
+                            }
                         }
-                        if attempts >= max_retries { break; }
+                        if attempts >= max_retries { 
+                            eprintln!("[{}] Worker reached max retries ({}) for chunk {}-{}", id_clone, max_retries, chunk.start, chunk.end);
+                            break; 
+                        }
+
+                        if attempts > 0 {
+                            let backoff = 2u64.pow(attempts as u32 - 1) * 1000;
+                            let backoff = backoff.min(30000); // capped at 30s
+                            println!("[{}] Retry #{} for chunk {}-{}. Sleeping {}ms", id_clone, attempts, chunk.start, chunk.end, backoff);
+                            
+                            // Responsive sleep: check for cancellation signal during backoff
+                            let sleep = tokio::time::sleep(std::time::Duration::from_millis(backoff));
+                            tokio::pin!(sleep);
+                            
+                            loop {
+                                tokio::select! {
+                                    _ = &mut sleep => break,
+                                    _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                                        if let Some(sig) = &cancel_signal {
+                                            if sig.load(Ordering::Relaxed) { break 'worker_mission; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         let res = async {
                             let chunk_file_raw = tokio::fs::OpenOptions::new().write(true).open(&filepath).await?;
@@ -426,30 +564,44 @@ impl Downloader {
                                 return Err(DownloadError::Network(format!("HTTP {}", response.status())));
                             }
 
+                            // Capture content-type for detailed error reporting if decoding fails
+                            let content_type = response.headers()
+                                .get(reqwest::header::CONTENT_TYPE)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+
+                            if content_type.contains("text/html") && url.contains("drive.google.com") {
+                                return Err(DownloadError::Network("Google Drive blocked download (Virus Scan or Login required)".to_string()));
+                            }
+
                             let mut stream = response.bytes_stream();
                             let mut local_downloaded = chunk.downloaded;
                             let mut last_db_update = std::time::Instant::now();
 
-                            while let Some(item) = stream.next().await {
+                            while let Ok(item_opt) = tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await {
                                 if let Some(sig) = &cancel_signal {
-                                    if sig.load(Ordering::Relaxed) { return Ok(()); }
+                                    if sig.load(Ordering::Relaxed) { break; }
                                 }
 
-                                let bytes = item.map_err(|e| DownloadError::Network(e.to_string()))?;
+                                let item = match item_opt {
+                                    Some(i) => i,
+                                    None => break, // Stream finished
+                                };
+
+                                let bytes = item.map_err(|e| {
+                                    eprintln!("[{}] Stream error (ContentType: {}) on chunk {}-{}: {}", id_clone, content_type, chunk.start, chunk.end, e);
+                                    DownloadError::Network(e.to_string())
+                                })?;
                                 chunk_file.write_all(&bytes).await?;
                                 let len = bytes.len() as u64;
 
-                                if global_speed_limit > 0 {
-                                    let per_worker_limit = global_speed_limit / (num_connections as u64).max(1);
-                                    if per_worker_limit > 0 {
-                                        let cost_ms = (len * 1000) / per_worker_limit;
-                                        if cost_ms > 0 {
-                                            tokio::time::sleep(std::time::Duration::from_millis(cost_ms)).await;
-                                        }
-                                    }
-                                }
+                                 if let Some(limiter) = &rate_limiter {
+                                     limiter.acquire(len, &cancel_signal).await;
+                                 }
 
                                 local_downloaded += len;
+                                chunk.downloaded += len;
                                 let current_total_downloaded = downloaded_atomic.fetch_add(len, Ordering::Relaxed) + len;
 
                                 // Throttled progress emission
@@ -501,7 +653,23 @@ impl Downloader {
                                 }
                                 final_error = Some(e);
                                 attempts += 1;
-                                tokio::time::sleep(std::time::Duration::from_millis(1000 * attempts as u64)).await;
+                                
+                                let retry_delay = 1000 * attempts as u64;
+                                println!("[{}] Error cooldown: retrying after {}ms...", id_clone, retry_delay);
+                                
+                                // Responsive sleep for the outer retry loop
+                                let sleep = tokio::time::sleep(std::time::Duration::from_millis(retry_delay));
+                                tokio::pin!(sleep);
+                                loop {
+                                    tokio::select! {
+                                        _ = &mut sleep => break,
+                                        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                                            if let Some(sig) = &cancel_signal {
+                                                if sig.load(Ordering::Relaxed) { break 'worker_mission; }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -584,7 +752,10 @@ impl Downloader {
             let len = chunk.len() as u64;
 
             // BANDWIDTH THROTTLING
-            if global_speed_limit > 0 {
+            if let Some(limiter) = &self.rate_limiter {
+                limiter.acquire(len, &self.cancel_signal).await;
+            } else if global_speed_limit > 0 {
+                // Fallback for when limiter isn't initialized but limit is set
                 let cost_ms = (len * 1000) / global_speed_limit;
                 if cost_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(cost_ms)).await;
@@ -661,42 +832,47 @@ pub fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> Stri
     // 1. Try Content-Disposition header first
     if let Some(cd) = headers.get("content-disposition") {
         if let Ok(cd_str) = cd.to_str() {
-            // Try filename*= (UTF-8 encoded)
+            // Try filename*= (UTF-8 encoded according to RFC 6266)
             if let Some(pos) = cd_str.find("filename*=") {
                 let parts = &cd_str[pos + 10..];
-                let filename = parts.split(';').next().unwrap_or("").trim();
-                // Format is usually UTF-8''filename.ext
-                if let Some(last_quote) = filename.rfind('\'') {
-                    let actual_name = &filename[last_quote + 1..];
+                let filename_part = parts.split(';').next().unwrap_or("").trim();
+                // Format is usually charset'lang'filename (e.g. UTF-8''hello.txt)
+                if let Some(last_quote) = filename_part.rfind('\'') {
+                    let actual_name = &filename_part[last_quote + 1..];
                     if let Ok(decoded) = percent_encoding::percent_decode(actual_name.as_bytes()).decode_utf8() {
                         return sanitize_filename(&decoded);
                     }
                 }
             }
             
-            // Try standard filename=
+            // Try standard filename= (often quoted, sometimes improperly percent-encoded by servers)
             if let Some(pos) = cd_str.find("filename=") {
                 let parts = &cd_str[pos + 9..];
-                let filename = parts.split(';').next().unwrap_or("").trim();
-                let filename = filename.trim_matches('"').trim_matches('\'');
-                if !filename.is_empty() {
-                    return sanitize_filename(filename);
+                let raw_name = parts.split(';').next().unwrap_or("").trim();
+                let raw_name = raw_name.trim_matches('"').trim_matches('\'');
+                if !raw_name.is_empty() {
+                    // Even for standard filename=, some servers send percent-encoded strings.
+                    // We attempt to decode it; if it's not encoded, it returns the original.
+                    if let Ok(decoded) = percent_encoding::percent_decode(raw_name.as_bytes()).decode_utf8() {
+                        return sanitize_filename(&decoded);
+                    }
+                    return sanitize_filename(raw_name);
                 }
             }
         }
     }
 
     // 2. Fall back to URL path
-    let filename = url.rsplit('/')
-        .next()
-        .and_then(|s| s.split('?').next())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
+    // We want the last non-empty segment before any query parameters or hash fragments
+    let filename = url.split('?').next().unwrap_or(url)
+        .split('#').next().unwrap_or(url)
+        .rsplit('/')
+        .find(|s| !s.is_empty())
         .map(|s| {
             percent_encoding::percent_decode(s.as_bytes())
                 .decode_utf8()
                 .map(|decoded| decoded.into_owned())
-                .unwrap_or(s)
+                .unwrap_or_else(|_| s.to_string())
         })
         .unwrap_or_else(|| "download".to_string());
         

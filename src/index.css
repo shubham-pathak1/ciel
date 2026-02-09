@@ -28,6 +28,20 @@
   body {
     @apply bg-brand-primary text-text-primary antialiased overflow-hidden selection:bg-white/20 selection:text-white;
   }
+
+  /* Remove Arrows/Spinners from input type number */
+  /* Chrome, Safari, Edge, Opera */
+  input::-webkit-outer-spin-button,
+  input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  /* Firefox */
+  input[type=number] {
+    -moz-appearance: textfield;
+    appearance: none;
+  }
 }
 
 @layer components {

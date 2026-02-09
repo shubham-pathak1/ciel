@@ -5,7 +5,7 @@
 
 use arboard::Clipboard;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use crate::db;
 
 /// Starts a background loop that polls the clipboard every second.
@@ -16,7 +16,7 @@ use crate::db;
 ///   content has changed since the last catch.
 /// - **URL Validation**: Heuristically determines if the clipboard contains a 
 ///   link relevant to Ciel.
-pub fn start_clipboard_monitor(app: AppHandle) {
+pub fn start_clipboard_monitor<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         let mut clipboard = Clipboard::new().ok();
         let mut last_clipboard = String::new();
