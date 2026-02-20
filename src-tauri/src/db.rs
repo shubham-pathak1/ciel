@@ -397,6 +397,17 @@ pub fn update_download_status<P: AsRef<Path>>(
     Ok(())
 }
 
+/// Marks a download as completed and records its completion timestamp.
+pub fn mark_download_completed<P: AsRef<Path>>(db_path: P, id: &str) -> SqliteResult<()> {
+    let conn = open_db(db_path)?;
+    let completed_at = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE downloads SET status = 'completed', completed_at = ?1 WHERE id = ?2",
+        (completed_at, id),
+    )?;
+    Ok(())
+}
+
 /// Periodically called to update the current byte count and transfer speed.
 pub fn update_download_progress<P: AsRef<Path>>(
     db_path: P,

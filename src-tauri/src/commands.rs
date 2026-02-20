@@ -812,7 +812,7 @@ async fn start_download_task<R: Runtime>(
                             let _ = db::update_download_size(&db_path_inner, &id_inner, final_total as i64);
                         }
                         
-                        let _ = db::update_download_status(&db_path_inner, &id_inner, DownloadStatus::Completed);
+                        let _ = db::mark_download_completed(&db_path_inner, &id_inner);
                         let _ = app.emit("download-completed", id_inner.clone());
 
                         // Native Notification
