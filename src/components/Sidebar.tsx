@@ -14,12 +14,14 @@ import {
     Archive,
     Gamepad2,
     FileText,
-    MoreHorizontal
+    MoreHorizontal,
+    Clock
 } from "lucide-react";
 import clsx from "clsx";
 import { motion } from "framer-motion";
+import { useSettings } from "../hooks/useSettings";
 
-type View = "downloads" | "active" | "completed" | "settings" | "Video" | "Audio" | "Compressed" | "Software" | "Documents" | "Other";
+type View = "downloads" | "active" | "completed" | "settings" | "scheduler" | "Video" | "Audio" | "Compressed" | "Software" | "Documents" | "Other";
 
 /**
  * Props for the Sidebar component.
@@ -62,12 +64,20 @@ const categoryItems: NavItem[] = [
  * - Managed fluid transitions between views using `framer-motion`.
  */
 export function Sidebar({ currentView, onViewChange }: SidebarProps) {
+    const { settings } = useSettings();
+
+    const mainNavItems = [...navItems];
+    if (settings.scheduler_enabled) {
+        // Insert before settings
+        mainNavItems.splice(3, 0, { id: "scheduler", label: "Scheduler", icon: Clock });
+    }
+
     return (
         <aside className="w-64 flex flex-col items-center py-6 px-4 bg-brand-primary border-r border-surface-border z-20">
             {/* Navigation */}
             <nav className="w-full flex-1">
                 <ul className="space-y-1">
-                    {navItems.map((item) => {
+                    {mainNavItems.map((item) => {
                         const Icon = item.icon;
                         const isActive = currentView === item.id;
 

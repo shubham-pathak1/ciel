@@ -11,29 +11,9 @@ import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { open } from "@tauri-apps/plugin-dialog";
 import { motion } from "framer-motion";
+import { useSettings, SettingsState } from "../hooks/useSettings";
+import { useUpdater } from "../hooks/useUpdater";
 
-/**
- * Complete application configuration state.
- */
-interface SettingsState {
-    download_path: string;
-    max_connections: string;
-    max_concurrent: string;
-    auto_resume: boolean;
-    theme: string;
-    ask_location: boolean;
-    autocatch_enabled: boolean;
-    speed_limit: string;
-    torrent_encryption: boolean;
-    open_folder_on_finish: boolean;
-    shutdown_on_finish: boolean;
-    sound_on_finish: boolean;
-    scheduler_enabled: boolean;
-    scheduler_start_time: string;
-    scheduler_pause_time: string;
-    auto_organize: boolean;
-    cookie_browser: string;
-}
 
 /**
  * Settings Component.
@@ -45,78 +25,39 @@ interface SettingsState {
  * - Provides a visual "Save" feedback loop.
  */
 export function Settings() {
-    const [settings, setSettings] = useState<SettingsState>({
-        download_path: "./downloads",
-        max_connections: "8",
-        max_concurrent: "3",
-        auto_resume: true,
-        theme: "dark",
-        ask_location: false,
-        autocatch_enabled: true,
-        speed_limit: "0",
-        torrent_encryption: false,
-        open_folder_on_finish: false,
-        shutdown_on_finish: false,
-        sound_on_finish: true,
-        scheduler_enabled: false,
-        scheduler_start_time: "02:00",
-        scheduler_pause_time: "08:00",
-        auto_organize: false,
-        cookie_browser: "none",
-    });
+    const { settings, saveAll } = useSettings();
+    const [localSettings, setLocalSettings] = useState<SettingsState>(settings);
     const [activeSection, setActiveSection] = useState("general");
     const [isSaving, setIsSaving] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
     const [hasActiveDownloads, setHasActiveDownloads] = useState(false);
+    const { checkForUpdates, checking } = useUpdater();
 
     useEffect(() => {
-        loadSettings();
+        setLocalSettings(settings);
+    }, [settings]);
+
+    useEffect(() => {
+        checkActiveDownloads();
     }, []);
 
-    const loadSettings = async () => {
+    const checkActiveDownloads = async () => {
         try {
-            const result = await invoke<Record<string, string>>("get_settings");
-            setSettings({
-                download_path: result.download_path || "./downloads",
-                max_connections: result.max_connections || "8",
-                max_concurrent: result.max_concurrent || "3",
-                auto_resume: result.auto_resume === "true",
-                theme: result.theme || "dark",
-                ask_location: result.ask_location === "true",
-                autocatch_enabled: result.autocatch_enabled === "true",
-                speed_limit: result.speed_limit || "0",
-                torrent_encryption: result.torrent_encryption === "true",
-                open_folder_on_finish: result.open_folder_on_finish === "true",
-                shutdown_on_finish: result.shutdown_on_finish === "true",
-                sound_on_finish: result.sound_on_finish === "true",
-                scheduler_enabled: result.scheduler_enabled === "true",
-                scheduler_start_time: result.scheduler_start_time || "02:00",
-                scheduler_pause_time: result.scheduler_pause_time || "08:00",
-                auto_organize: result.auto_organize === "true",
-                cookie_browser: result.cookie_browser || "none",
-            });
-
-            // Check for active downloads
             const downloads = await invoke<any[]>("get_downloads");
             const active = downloads.some(d => d.status === "downloading");
             setHasActiveDownloads(active);
         } catch (err) {
-            console.error("Failed to load settings:", err);
+            console.error("Failed to check active downloads:", err);
         }
     };
 
     /**
      * Persists all current state values to the backend database.
-     * Iterates through the state object and calls `update_setting` for each key.
      */
     const handleSave = async () => {
         setIsSaving(true);
         try {
-            for (const [key, value] of Object.entries(settings)) {
-                // Convert boolean values back to string for storage if necessary
-                const stringValue = typeof value === 'boolean' ? String(value) : value;
-                await invoke("update_setting", { key, value: stringValue });
-            }
+            await saveAll(localSettings);
             setShowSuccess(true);
             setTimeout(() => setShowSuccess(false), 3000);
         } catch (err) {
@@ -127,7 +68,7 @@ export function Settings() {
     };
 
     const handleChange = (key: keyof SettingsState, value: string | boolean) => {
-        setSettings(prev => ({ ...prev, [key]: value }));
+        setLocalSettings(prev => ({ ...prev, [key]: value }));
     };
 
     const handleBrowse = async () => {
@@ -424,14 +365,14 @@ export function Settings() {
                             description="Play a subtle sound when a download task completes."
                         >
                             <SettingToggle
-                                enabled={settings.sound_on_finish}
-                                onToggle={() => handleChange("sound_on_finish", !settings.sound_on_finish)}
+                                enabled={localSettings.sound_on_finish}
+                                onToggle={() => handleChange("sound_on_finish", !localSettings.sound_on_finish)}
                             />
                         </SettingItem>
 
                         <div className="pt-4 border-t border-brand-tertiary/20">
                             <h3 className="text-sm font-medium text-text-primary flex items-center gap-2 mb-4">
-                                <Clock size={16} className="text-brand-secondary" />
+                                <Clock size={16} className="text-text-primary" />
                                 Download Scheduler
                             </h3>
 
@@ -442,33 +383,10 @@ export function Settings() {
                                         <span className="text-xs text-text-tertiary">Manage downloads based on time</span>
                                     </div>
                                     <SettingToggle
-                                        enabled={settings.scheduler_enabled}
-                                        onToggle={() => handleChange('scheduler_enabled', !settings.scheduler_enabled)}
+                                        enabled={localSettings.scheduler_enabled}
+                                        onToggle={() => handleChange('scheduler_enabled', !localSettings.scheduler_enabled)}
                                     />
                                 </div>
-
-                                {settings.scheduler_enabled && (
-                                    <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                                        <div className="flex flex-col gap-2">
-                                            <label className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Start Time</label>
-                                            <input
-                                                type="time"
-                                                className="w-full bg-brand-tertiary border border-surface-border rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-white/20 transition-all [color-scheme:dark]"
-                                                value={settings.scheduler_start_time}
-                                                onChange={(e) => handleChange('scheduler_start_time', e.target.value)}
-                                            />
-                                        </div>
-                                        <div className="flex flex-col gap-2">
-                                            <label className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Pause Time</label>
-                                            <input
-                                                type="time"
-                                                className="w-full bg-brand-tertiary border border-surface-border rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-white/20 transition-all [color-scheme:dark]"
-                                                value={settings.scheduler_pause_time}
-                                                onChange={(e) => handleChange('scheduler_pause_time', e.target.value)}
-                                            />
-                                        </div>
-                                    </div>
-                                )}
                             </div>
                         </div>
                     </div>
@@ -548,6 +466,26 @@ export function Settings() {
                         </div>
 
                         <p className="text-sm text-text-secondary leading-relaxed max-w-md mx-auto">Built for speed!</p>
+
+                        <div className="flex justify-center my-4">
+                            <button
+                                onClick={() => checkForUpdates()}
+                                disabled={checking}
+                                className="px-5 py-2 bg-brand-secondary/50 hover:bg-brand-secondary border border-surface-border rounded-lg text-sm font-medium text-text-primary transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                {checking ? (
+                                    <>
+                                        <div className="w-3 h-3 border-2 border-text-tertiary border-t-text-primary rounded-full animate-spin" />
+                                        <span>Checking...</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Globe size={14} className="text-text-tertiary" />
+                                        <span>Check for Updates</span>
+                                    </>
+                                )}
+                            </button>
+                        </div>
 
                         <div className="grid grid-cols-2 gap-4 max-w-sm mx-auto">
                             <a href="https://github.com/shubham-pathak1/ciel" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-brand-secondary hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all border border-surface-border text-xs font-medium group">

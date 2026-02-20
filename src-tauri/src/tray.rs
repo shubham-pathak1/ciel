@@ -7,9 +7,45 @@
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime,
+    AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder,
 };
 use crate::scheduler;
+
+/// Helper function to show or recreate the main window.
+/// If the window was destroyed to save RAM, this recreates it.
+pub fn show_or_create_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        // Window exists, just show and focus it
+        let _ = window.show();
+        let _ = window.set_focus();
+    } else {
+        // Window was destroyed, recreate it
+        let url = if cfg!(debug_assertions) {
+            WebviewUrl::External("http://localhost:1420".parse().unwrap())
+        } else {
+            WebviewUrl::App("index.html".into())
+        };
+        
+        if let Ok(window) = WebviewWindowBuilder::new(app, "main", url)
+            .title("Ciel")
+            .inner_size(1100.0, 700.0)
+            .min_inner_size(900.0, 600.0)
+            .resizable(true)
+            .decorations(false)
+            .transparent(true)
+            .center()
+            .build()
+        {
+            // Reapply Mica effect on Windows
+            #[cfg(target_os = "windows")]
+            {
+                use window_vibrancy::apply_mica;
+                let _ = apply_mica(&window, Some(true));
+            }
+            let _ = window.set_focus();
+        }
+    }
+}
 
 /// Bootstraps the system tray icon, context menu, and event handlers.
 /// 
@@ -71,10 +107,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             match event.id.as_ref() {
                 "quit" => app.exit(0),
                 "show" => {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_or_create_window(app);
                 }
                 "pause_all" => {
                     tauri::async_runtime::spawn(async move {
@@ -96,10 +129,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 ..
             } => {
                 let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                show_or_create_window(app);
             }
             _ => {}
         })

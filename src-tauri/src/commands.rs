@@ -478,12 +478,14 @@ pub async fn add_download<R: Runtime>(
     app: AppHandle<R>,
     db_state: State<'_, DbState>,
     manager: State<'_, DownloadManager>,
+    torrent_manager: State<'_, TorrentManager>,
     url: String,
     filename: String,
     _filepath: String,
     output_folder: Option<String>,
     user_agent: Option<String>,
     mut cookies: Option<String>,
+    start_paused: Option<bool>,
 ) -> Result<Download, String> {
     let url = transform_google_drive_url(&url);
 
@@ -525,6 +527,17 @@ pub async fn add_download<R: Runtime>(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| filename.clone());
 
+    // Queue enforcement: Check if we can start immediately or must queue
+    let max_simultaneous = db::get_setting(&db_state.path, "max_concurrent")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(3);
+    
+    let active_count = manager.active_downloads.lock().await.len();
+    let (torrent_active, _) = torrent_manager.get_global_status().await;
+    let should_queue = !start_paused.unwrap_or(false) && (active_count + torrent_active) >= max_simultaneous;
+
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
         id: id.clone(),
@@ -533,7 +546,13 @@ pub async fn add_download<R: Runtime>(
         filepath: final_resolved_path,
         size: 0,
         downloaded: 0,
-        status: DownloadStatus::Downloading,
+        status: if start_paused.unwrap_or(false) { 
+            DownloadStatus::Paused 
+        } else if should_queue { 
+            DownloadStatus::Queued 
+        } else { 
+            DownloadStatus::Downloading 
+        },
         protocol: DownloadProtocol::Http,
         speed: 0,
         connections: max_connections,
@@ -548,9 +567,18 @@ pub async fn add_download<R: Runtime>(
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
-    db::log_event(&db_state.path, &download.id, "created", Some("HTTP download initiated")).ok();
+    db::log_event(&db_state.path, &download.id, "created", Some(if start_paused.unwrap_or(false) { 
+        "HTTP download added (Scheduled/Paused)" 
+    } else if should_queue {
+        "HTTP download queued (concurrent limit reached)"
+    } else { 
+        "HTTP download initiated" 
+    })).ok();
 
-    start_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
+    // Only start if not paused and not queued
+    if !start_paused.unwrap_or(false) && !should_queue {
+        start_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
+    }
 
     Ok(download)
 }
@@ -566,12 +594,14 @@ pub async fn add_download<R: Runtime>(
 pub async fn add_torrent<R: Runtime>(
     app: AppHandle<R>,
     db_state: State<'_, DbState>,
+    manager: State<'_, DownloadManager>,
     torrent_manager: State<'_, TorrentManager>,
     url: String, // Magnet link or local file path
     mut filename: String,
     _filepath: String,
     output_folder: Option<String>,
     indices: Option<Vec<usize>>,
+    start_paused: Option<bool>,
 ) -> Result<Download, String> {
     let is_magnet = url.starts_with("magnet:");
     
@@ -594,6 +624,19 @@ pub async fn add_torrent<R: Runtime>(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| filename.clone());
 
+    // Queue enforcement: Check if we can start immediately or must queue
+    let max_simultaneous = db::get_setting(&db_state.path, "max_concurrent")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(3);
+    
+    // Count both HTTP and Torrent active downloads
+    let http_active = manager.active_downloads.lock().await.len();
+    let (torrent_active, _) = torrent_manager.get_global_status().await;
+    let active_count = http_active + torrent_active;
+    let should_queue = !start_paused.unwrap_or(false) && active_count >= max_simultaneous;
+
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
         id: id.clone(),
@@ -602,7 +645,13 @@ pub async fn add_torrent<R: Runtime>(
         filepath: final_resolved_path.clone(),
         size: 0,
         downloaded: 0,
-        status: DownloadStatus::Downloading,
+        status: if start_paused.unwrap_or(false) { 
+            DownloadStatus::Paused 
+        } else if should_queue { 
+            DownloadStatus::Queued 
+        } else { 
+            DownloadStatus::Downloading 
+        },
         protocol: DownloadProtocol::Torrent,
         speed: 0,
         connections: 0,
@@ -610,23 +659,26 @@ pub async fn add_torrent<R: Runtime>(
         completed_at: None,
         error_message: None,
         info_hash: None,
-        metadata: None,
+        metadata: indices.as_ref().and_then(|idxs| serde_json::to_string(idxs).ok()),
         user_agent: None,
         cookies: None,
-        category: "Other".to_string(), // Torrents can be anything, default to other or analyze further?
+        category: "Other".to_string(),
     };
 
     db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
-    db::log_event(&db_state.path, &download.id, "created", Some("Torrent download initiated")).ok();
+    db::log_event(&db_state.path, &download.id, "created", Some(if start_paused.unwrap_or(false) { 
+        "Torrent added (Scheduled/Paused)" 
+    } else if should_queue {
+        "Torrent queued (concurrent limit reached)"
+    } else { 
+        "Torrent download initiated" 
+    })).ok();
 
     let is_duplicate = resolved_path != final_resolved_path;
 
     // For torrents, base_folder must always be a DIRECTORY (not a file path)
     // librqbit will create the torrent's internal file structure inside this folder
     let base_folder = if is_duplicate {
-        // For duplicates, use the unique path as a folder
-        // BUT strip the extension so it looks like a folder, e.g. "Downloads/Movie (1)"
-        // This isolates the duplicate download in its own folder, guaranteeing no hash collision
         let path = Path::new(&final_resolved_path);
         let stem = path.file_stem().unwrap_or(std::ffi::OsStr::new("unknown"));
         let parent = path.parent().unwrap_or(Path::new("."));
@@ -634,11 +686,13 @@ pub async fn add_torrent<R: Runtime>(
     } else if let Some(folder) = output_folder {
         folder
     } else {
-        // Use the parent directory of the resolved path
         Path::new(&final_resolved_path).parent().unwrap_or(Path::new(".")).to_string_lossy().to_string()
     };
     
-    torrent_manager.add_magnet(app, id.clone(), url, base_folder, db_state.path.clone(), indices, 0, false).await?;
+    // Only start if not paused and not queued
+    if !should_queue {
+        torrent_manager.add_magnet(app, id.clone(), url, base_folder, db_state.path.clone(), indices, 0, false, start_paused.unwrap_or(false)).await?;
+    }
 
     Ok(download)
 }
@@ -907,7 +961,8 @@ pub async fn resume_download<R: Runtime>(
                     db_state.path.clone(), 
                     indices,
                     download.size as u64,
-                    true
+                    true,
+                    false
                 ).await?;
             }
         }
@@ -1199,6 +1254,94 @@ fn get_cookies_from_browser(browser: &str, url: &str) -> Option<String> {
         Err(e) => {
             eprintln!("Failed to extract cookies from {}: {}", browser, e);
             None
+        }
+    }
+}
+
+/// QUEUE PROCESSOR
+/// 
+/// Checks if the number of active downloads is below the limit, and if so,
+/// starts the next queued download from the database.
+pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
+    let db_state: State<DbState> = app.state();
+    let manager: State<DownloadManager> = app.state();
+    let torrent_manager: State<TorrentManager> = app.state();
+
+    // Loop until we max out slots or run out of queued items
+    loop {
+        // 1. Check Limits
+        let max_simultaneous = db::get_setting(&db_state.path, "max_concurrent")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3);
+        
+        let http_active = manager.active_downloads.lock().await.len();
+        let (torrent_active, _) = torrent_manager.get_global_status().await;
+        
+        if (http_active + torrent_active) >= max_simultaneous {
+            break;
+        }
+
+        // 2. Get Next Queued
+        let next_download = match db::get_next_queued_download(&db_state.path) {
+            Ok(Some(d)) => d,
+            Ok(None) => break, // No more queued items
+            Err(e) => {
+                eprintln!("Failed to fetch queued download: {}", e);
+                break;
+            }
+        };
+
+        // 3. Start Download
+        let id = next_download.id.clone();
+        println!("Queue Processor: Starting {}", next_download.filename);
+        
+        // Update status first to prevent race conditions (double starting)
+        if let Err(e) = db::update_download_status(&db_state.path, &id, DownloadStatus::Downloading) {
+             eprintln!("Failed to update status for {}: {}", id, e);
+             continue;
+        }
+        
+        db::log_event(&db_state.path, &id, "started", Some("Auto-started from queue")).ok();
+        let _ = app.emit("download-started", id.clone());
+
+        match next_download.protocol {
+            DownloadProtocol::Http => {
+                if let Err(e) = start_download_task(app.clone(), db_state.path.clone(), manager.inner().clone(), next_download).await {
+                     eprintln!("Failed to start queued HTTP download {}: {}", id, e);
+                     let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Error);
+                     let _ = app.emit("download-error", (id, e));
+                }
+            },
+            DownloadProtocol::Torrent => {
+                let path = Path::new(&next_download.filepath);
+                let base_folder = path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string();
+                
+                let indices: Option<Vec<usize>> = next_download.metadata.as_ref()
+                    .and_then(|m| serde_json::from_str(m).ok());
+
+                if let Err(e) = torrent_manager.add_magnet(
+                    app.clone(), 
+                    id.clone(), 
+                    next_download.url.clone(), 
+                    base_folder, 
+                    db_state.path.clone(), 
+                    indices, 
+                    0, 
+                    true, // is_resume
+                    false // start_paused
+                ).await {
+                     eprintln!("Failed to start queued torrent {}: {}", id, e);
+                     let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Error);
+                     let _ = app.emit("download-error", (id, e));
+                }
+            },
+            DownloadProtocol::Video => {
+                // TODO: Implement video download queuing when video support is fully added
+                eprintln!("Video queuing not yet supported for {}", id);
+                let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Error);
+            }
         }
     }
 }

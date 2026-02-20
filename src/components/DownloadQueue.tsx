@@ -5,12 +5,13 @@
  */
 
 import React, { useState, useEffect, useCallback, memo } from "react";
-import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Database as DatabaseIcon } from "lucide-react";
+import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Database as DatabaseIcon, ChevronDown } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 import clsx from "clsx";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useSettings } from "../hooks/useSettings";
 import { ModalPortal } from "./ModalPortal";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { TorrentFileSelector } from "./TorrentFileSelector";
@@ -105,6 +106,7 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
     const [downloads, setDownloads] = useState<DownloadItem[]>([]);
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
     const [autocatchUrl, setAutocatchUrl] = useState("");
+    const [sortBy, setSortBy] = useState<"date" | "name" | "size" | "progress">("date");
 
     /**
      * Refreshes the download list and handles the "Auto-Resume" feature.
@@ -208,12 +210,33 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
     }, []);
 
 
-    const filteredDownloads = downloads.filter((d) => {
+    // Apply status filter from props
+    let processedDownloads = downloads.filter((d) => {
         if (filter === "active") return d.status === "downloading" || d.status === "queued";
         if (filter === "completed") return d.status === "completed";
         if (category && category !== "All") return d.category === category;
         return true;
     });
+
+    // Apply sorting
+    processedDownloads = [...processedDownloads].sort((a, b) => {
+        switch (sortBy) {
+            case "name":
+                return a.filename.localeCompare(b.filename);
+            case "size":
+                return b.size - a.size; // Largest first
+            case "progress":
+                const progA = a.size > 0 ? a.downloaded / a.size : 0;
+                const progB = b.size > 0 ? b.downloaded / b.size : 0;
+                return progB - progA; // Most progress first
+            case "date":
+            default:
+                // Assuming id is a timestamp-based UUID or we keep original order
+                return 0;
+        }
+    });
+
+    const filteredDownloads = processedDownloads;
 
     // Count only truly active downloads for the badge (not completed or errored)
     const activeCount = downloads.filter(d => d.status === "downloading" || d.status === "queued" || d.status === "paused").length;
@@ -250,6 +273,23 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
                     >
                         <ArrowDown size={18} className="text-text-secondary" />
                     </button>
+                </div>
+            </div>
+
+            {/* Sort Dropdown */}
+            <div className="px-8 pb-4 flex items-center justify-end">
+                <div className="relative">
+                    <select
+                        value={sortBy}
+                        onChange={(e) => setSortBy(e.target.value as any)}
+                        className="appearance-none bg-brand-secondary border border-surface-border rounded-lg pl-3 pr-8 py-1.5 text-xs font-medium text-text-secondary focus:outline-none focus:border-accent-primary transition-colors cursor-pointer"
+                    >
+                        <option value="date">Date Added</option>
+                        <option value="name">Name</option>
+                        <option value="size">Size</option>
+                        <option value="progress">Progress</option>
+                    </select>
+                    <ChevronDown size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary pointer-events-none" />
                 </div>
             </div>
 
@@ -564,6 +604,7 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
 ));
 
 function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () => void, onAdded: () => void, initialUrl?: string }) {
+    const [mode, setMode] = useState<"single" | "batch">("single");
     const [url, setUrl] = useState(initialUrl);
     const [isAdding, setIsAdding] = useState(false);
     const [status, setStatus] = useState<string | null>(null);
@@ -571,6 +612,8 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [userAgent, setUserAgent] = useState("");
     const [cookies, setCookies] = useState("");
+    const [startPaused, setStartPaused] = useState(false);
+    const { settings } = useSettings();
 
     useEffect(() => {
         const checkClipboard = async () => {
@@ -588,6 +631,9 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                         const clipText = await invoke<string | null>("get_clipboard");
                         if (clipText) {
                             setUrl(clipText);
+                            if (clipText.includes('\n')) {
+                                setMode("batch");
+                            }
                         }
                     }
                 } catch (e) {
@@ -615,42 +661,122 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         return undefined;
     };
 
-    const handleAdd = async () => {
+    const handleAdd = async (paused: boolean = false) => {
         if (!url) return;
-        try { new URL(url); } catch (e) { setStatus("Error: Invalid URL"); return; }
+
+        const urls = mode === "batch"
+            ? url.split('\n').map(u => u.trim()).filter(u => u.length > 0)
+            : [url.trim()];
+
+        if (urls.length === 0) return;
+
+        // Batch limit
+        const MAX_BATCH_SIZE = 20;
+        if (urls.length > MAX_BATCH_SIZE) {
+            setStatus(`Maximum ${MAX_BATCH_SIZE} URLs per batch. You have ${urls.length}.`);
+            return;
+        }
 
         setIsAdding(true);
-        setStatus("Analyzing...");
+        setStartPaused(paused);
 
-        try {
-            const typeInfo = await invoke<any>("validate_url_type", { url });
-            if (typeInfo.is_magnet) {
-                const info = await invoke<TorrentInfo>("analyze_torrent", { url });
-                setTorrentInfo(info);
-                setStatus(null);
-            } else {
-                const output_folder = await getSaveLocation();
-                if (output_folder === null) {
+        // Single Mode: use the interactive flow (for torrent file selection)
+        if (mode === "single") {
+            const singleUrl = urls[0];
+            try { new URL(singleUrl); } catch (e) {
+                // Allow magnet links even if URL parser fails
+                if (!singleUrl.startsWith("magnet:")) {
+                    setStatus("Error: Invalid URL");
                     setIsAdding(false);
-                    return; // User cancelled
+                    return;
                 }
-
-                await invoke("add_download", {
-                    url: typeInfo.resolved_url || url,
-                    filename: typeInfo.hinted_filename || "download",
-                    filepath: "",
-                    outputFolder: output_folder || null,
-                    userAgent: userAgent || null,
-                    cookies: cookies || null
-                });
-                onAdded();
-                onClose();
             }
-        } catch (err) {
-            setStatus(`Error: ${err}`);
-        } finally {
-            if (!torrentInfo) setIsAdding(false);
+
+            try {
+                setStatus("Analyzing...");
+                const typeInfo = await invoke<any>("validate_url_type", { url: singleUrl });
+                if (typeInfo.is_magnet) {
+                    const info = await invoke<TorrentInfo>("analyze_torrent", { url: singleUrl });
+                    setTorrentInfo(info);
+                    setStatus(null);
+                } else {
+                    const output_folder = await getSaveLocation();
+                    if (output_folder === null) {
+                        setIsAdding(false);
+                        return;
+                    }
+
+                    await invoke("add_download", {
+                        url: typeInfo.resolved_url || singleUrl,
+                        filename: typeInfo.hinted_filename || "download",
+                        filepath: "",
+                        outputFolder: output_folder || null,
+                        userAgent: userAgent || null,
+                        cookies: cookies || null,
+                        startPaused: paused
+                    });
+                    onAdded();
+                    onClose();
+                    setIsAdding(false);
+                }
+            } catch (err) {
+                setStatus(`Error: ${err}`);
+                setIsAdding(false);
+            }
+            return;
         }
+
+        // Bulk Mode
+        let successCount = 0;
+        const output_folder = await getSaveLocation();
+
+        // If user cancels location selection for bulk, abort all
+        if (output_folder === null) {
+            setIsAdding(false);
+            return;
+        }
+
+        for (let i = 0; i < urls.length; i++) {
+            const currentUrl = urls[i];
+            setStatus(`Adding ${i + 1}/${urls.length}...`);
+
+            try {
+                const typeInfo = await invoke<any>("validate_url_type", { url: currentUrl });
+
+                if (typeInfo.is_magnet) {
+                    // For bulk, we bypass interactive selection and download ALL files (indices: null)
+                    await invoke("add_torrent", {
+                        url: currentUrl,
+                        filename: "Torrent", // Backend will eventually fetch metadata
+                        filepath: "",
+                        indices: null, // Select all files
+                        outputFolder: output_folder || null,
+                        startPaused: paused
+                    });
+                } else {
+                    await invoke("add_download", {
+                        url: typeInfo.resolved_url || currentUrl,
+                        filename: typeInfo.hinted_filename || "download",
+                        filepath: "",
+                        outputFolder: output_folder || null,
+                        userAgent: userAgent || null,
+                        cookies: cookies || null,
+                        startPaused: paused
+                    });
+                }
+                successCount++;
+            } catch (err) {
+                console.error(`Failed to add ${currentUrl}:`, err);
+                // Continue with next URL
+            }
+        }
+
+        setStatus(successCount === urls.length ? "Done!" : `Added ${successCount}/${urls.length} downloads`);
+        setTimeout(() => {
+            onAdded();
+            onClose();
+            setIsAdding(false);
+        }, 500);
     };
 
     const handleTorrentSelect = async (indices: number[]) => {
@@ -661,7 +787,14 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                 setIsAdding(false);
                 return;
             }
-            await invoke("add_torrent", { url, filename: torrentInfo?.name || "Torrent", filepath: "", indices, outputFolder: output_folder || null });
+            await invoke("add_torrent", {
+                url,
+                filename: torrentInfo?.name || "Torrent",
+                filepath: "",
+                indices,
+                outputFolder: output_folder || null,
+                startPaused
+            });
             onAdded();
             onClose();
         } catch (err) {
@@ -681,23 +814,58 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                         exit={{ opacity: 0, scale: 0.98 }}
                         className="bg-brand-secondary border border-surface-border w-full max-w-lg rounded-xl p-6 shadow-2xl relative text-left"
                     >
-                        <h2 className="text-xl font-bold tracking-tight text-text-primary mb-1">
+                        <h2 className="text-xl font-bold tracking-tight text-text-primary mb-4">
                             Add New Download
                         </h2>
-                        <p className="text-text-secondary text-sm mb-6">
-                            Enter a URL or Magnet link.
-                        </p>
+
+                        {/* Tabs */}
+                        <div className="flex gap-4 mb-4 border-b border-surface-border">
+                            <button
+                                onClick={() => setMode("single")}
+                                className={clsx(
+                                    "pb-2 text-sm font-medium transition-colors border-b-2",
+                                    mode === "single" ? "text-accent-primary border-accent-primary" : "text-text-secondary border-transparent hover:text-text-primary"
+                                )}
+                            >
+                                Single Link
+                            </button>
+                            <button
+                                onClick={() => setMode("batch")}
+                                className={clsx(
+                                    "pb-2 text-sm font-medium transition-colors border-b-2",
+                                    mode === "batch" ? "text-accent-primary border-accent-primary" : "text-text-secondary border-transparent hover:text-text-primary"
+                                )}
+                            >
+                                Batch List
+                            </button>
+                        </div>
 
                         <div className="space-y-4">
-                            <input
-                                autoFocus
-                                type="text"
-                                value={url}
-                                onChange={(e) => setUrl(e.target.value)}
-                                placeholder="https://..."
-                                className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
-                                onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-                            />
+                            {mode === "single" ? (
+                                <input
+                                    autoFocus
+                                    type="text"
+                                    value={url}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                    placeholder="https://..."
+                                    className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
+                                    onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+                                />
+                            ) : (
+                                <textarea
+                                    autoFocus
+                                    value={url}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                    placeholder="Paste multiple URLs (one per line)..."
+                                    className="w-full h-32 bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm resize-none"
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                            e.preventDefault();
+                                            handleAdd();
+                                        }
+                                    }}
+                                />
+                            )}
 
                             <div className="pt-2">
                                 <button
@@ -747,7 +915,17 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                             )}
                             <div className="flex justify-end gap-3 mt-8">
                                 <button onClick={onClose} className="px-4 py-2 text-text-secondary text-sm" disabled={isAdding}>Cancel</button>
-                                <button onClick={handleAdd} disabled={isAdding || !url} className="btn-primary text-sm">
+                                {settings.scheduler_enabled && (
+                                    <button
+                                        onClick={() => handleAdd(true)}
+                                        disabled={isAdding || !url}
+                                        className="btn-secondary text-sm flex items-center gap-2"
+                                    >
+                                        <Clock size={14} />
+                                        <span>Schedule</span>
+                                    </button>
+                                )}
+                                <button onClick={() => handleAdd(false)} disabled={isAdding || !url} className="btn-primary text-sm">
                                     {isAdding ? "Analyzing..." : "Add Download"}
                                 </button>
                             </div>

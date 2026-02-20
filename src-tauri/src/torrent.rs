@@ -78,7 +78,7 @@ impl TorrentManager {
     }
 
     /// Adds a new magnet link or torrent file to the active session.
-    pub async fn add_magnet<R: Runtime>(&self, app: AppHandle<R>, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>, total_size: u64, is_resume: bool) -> Result<(), String> {
+    pub async fn add_magnet<R: Runtime>(&self, app: AppHandle<R>, id: String, magnet: String, output_folder: String, db_path: String, indices: Option<Vec<usize>>, total_size: u64, is_resume: bool, start_paused: bool) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Torrent session is not active (port conflict or initialization error)")?;
         
         // PROACTIVE GHOST CLEANUP: Delete any existing torrent with the same info hash before adding.
@@ -98,6 +98,10 @@ impl TorrentManager {
             .map_err(|e| e.to_string())?;
         
         let handle = response.into_handle().ok_or("Failed to get torrent handle")?;
+        
+        if start_paused {
+            let _ = session.pause(&handle).await;
+        }
         
         {
             let mut active = self.active_torrents.lock().await;

@@ -21,6 +21,7 @@ pub mod clipboard;
 pub mod tray;
 
 use tauri::Manager;
+use tauri::Listener;
 
 /// The primary entry point to initialize and launch the Ciel application.
 /// 
@@ -35,10 +36,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            let _ = app
-                .get_webview_window("main")
-                .expect("no main window")
-                .set_focus();
+            // Window may have been destroyed to save RAM, so we recreate if needed
+            tray::show_or_create_window(app);
         }))
         .setup(|app| {
             // DATABASE INITIALIZATION
@@ -95,13 +94,32 @@ pub fn run() {
             clipboard::start_clipboard_monitor(app.handle().clone());
             scheduler::start_scheduler(app.handle().clone());
 
+            // QUEUE MANAGEMENT
+            // Listen for completion/error events to trigger the queue processor
+            let handle = app.handle().clone();
+            app.listen("download-completed", move |_| {
+                let handle_clone = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::process_queue(handle_clone).await;
+                });
+            });
+
+            let handle = app.handle().clone();
+            app.listen("download-error", move |_| {
+                let handle_clone = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::process_queue(handle_clone).await;
+                });
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // UX: Instead of exiting, minimize the app to the system tray.
-                // This keeps active downloads running in the background.
-                window.hide().unwrap();
+                // RAM OPTIMIZATION: Destroy the webview entirely instead of hiding it.
+                // This drops WebView2 memory from ~200MB to near zero.
+                // The window will be recreated when the user clicks the tray icon.
+                let _ = window.destroy();
                 api.prevent_close();
             }
         })

@@ -213,6 +213,7 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
         INSERT OR IGNORE INTO settings (key, value) VALUES
             ('download_path', ''),
             ('max_concurrent', '3'),
+            ('max_simultaneous_downloads', '3'),
             ('max_connections', '8'),
             ('auto_start', 'true'),
             ('notifications', 'true'),
@@ -598,4 +599,24 @@ pub fn delete_finished_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<()>
     let _ = conn.execute("DELETE FROM history WHERE download_id NOT IN (SELECT id FROM downloads)", []);
     
     Ok(())
+}
+
+/// Retrieves the next queued download (oldest first).
+pub fn get_next_queued_download<P: AsRef<Path>>(db_path: P) -> SqliteResult<Option<Download>> {
+    let conn = open_db(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category
+         FROM downloads
+         WHERE status = 'queued'
+         ORDER BY created_at ASC
+         LIMIT 1"
+    )?;
+
+    let mut rows = stmt.query([])?;
+
+    if let Some(row) = rows.next()? {
+        Ok(Some(row_to_download(row)?))
+    } else {
+        Ok(None)
+    }
 }

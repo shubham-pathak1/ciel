@@ -1,16 +1,25 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { DownloadQueue } from "./components/DownloadQueue";
 import { Settings } from "./components/Settings";
 import { History } from "./components/History";
+import { Scheduler } from "./components/Scheduler";
+import { useSettings } from "./hooks/useSettings";
 import { motion, AnimatePresence } from "framer-motion";
 
-type View = "downloads" | "active" | "completed" | "settings" | "Video" | "Audio" | "Compressed" | "Software" | "Documents" | "Other";
+type View = "downloads" | "active" | "completed" | "settings" | "scheduler" | "Video" | "Audio" | "Compressed" | "Software" | "Documents" | "Other";
 
 
 function App() {
     const [currentView, setCurrentView] = useState<View>("downloads");
+    const { settings } = useSettings();
+
+    useEffect(() => {
+        if (currentView === "scheduler" && !settings.scheduler_enabled) {
+            setCurrentView("downloads");
+        }
+    }, [settings.scheduler_enabled, currentView]);
 
     const renderContent = () => {
         if (["Video", "Audio", "Compressed", "Software", "Documents", "Other"].includes(currentView)) {
@@ -22,6 +31,8 @@ function App() {
                 return <Settings />;
             case "completed":
                 return <History />;
+            case "scheduler":
+                return <Scheduler />;
             case "active":
                 return <DownloadQueue filter="active" />;
             case "downloads":
