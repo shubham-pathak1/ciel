@@ -828,7 +828,13 @@ async fn start_download_task<R: Runtime>(
                     }
                     Err(e) => {
                         let _ = db::update_download_status(&db_path_inner, &id_inner, DownloadStatus::Error);
-                        let _ = app.emit("download-error", (id_inner.clone(), e.to_string()));
+                        let _ = app.emit(
+                            "download-error",
+                            serde_json::json!({
+                                "id": id_inner.clone(),
+                                "message": e.to_string()
+                            }),
+                        );
 
                         // Native Notification
                         app.notification()
@@ -920,15 +926,15 @@ pub async fn resume_download<R: Runtime>(
         return Err("Download already completed".to_string());
     }
 
-    // Check if truly active in its respective manager
-    let is_active = match download.protocol {
-        DownloadProtocol::Torrent => torrent_manager.is_active(&id).await,
-        _ => manager.is_active(&id).await,
-    };
-
-    if is_active && download.status == DownloadStatus::Downloading {
-         // If it's active and status is downloading, it might already be running.
-         // But we allow resuming a paused torrent.
+    // Idempotency guard for HTTP downloads:
+    // if already active in memory, do not start another worker task.
+    if download.protocol == DownloadProtocol::Http && manager.is_active(&id).await {
+        // Keep DB state consistent in case it's stale.
+        if download.status != DownloadStatus::Downloading {
+            db::update_download_status(&db_state.path, &id, DownloadStatus::Downloading)
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(());
     }
 
     db::update_download_status(&db_state.path, &id, DownloadStatus::Downloading).map_err(|e| e.to_string())?;
@@ -936,8 +942,10 @@ pub async fn resume_download<R: Runtime>(
 
     match download.protocol {
         DownloadProtocol::Torrent => {
-            // Try to resume existing session
-            if let Err(_) = torrent_manager.resume_torrent(&id).await {
+            // Try to resume existing in-memory session first.
+            if torrent_manager.is_active(&id).await {
+                torrent_manager.resume_torrent(&id).await?;
+            } else {
                 // If it wasn't in the active session map (e.g. app restart), re-add it.
                 // It will automatically verify existing files and resume.
                 let output_folder = std::path::Path::new(&download.filepath).parent()
@@ -1311,7 +1319,13 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
                 if let Err(e) = start_download_task(app.clone(), db_state.path.clone(), manager.inner().clone(), next_download).await {
                      eprintln!("Failed to start queued HTTP download {}: {}", id, e);
                      let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Error);
-                     let _ = app.emit("download-error", (id, e));
+                     let _ = app.emit(
+                         "download-error",
+                         serde_json::json!({
+                             "id": id,
+                             "message": e
+                         }),
+                     );
                 }
             },
             DownloadProtocol::Torrent => {
@@ -1334,7 +1348,13 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
                 ).await {
                      eprintln!("Failed to start queued torrent {}: {}", id, e);
                      let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Error);
-                     let _ = app.emit("download-error", (id, e));
+                     let _ = app.emit(
+                         "download-error",
+                         serde_json::json!({
+                             "id": id,
+                             "message": e
+                         }),
+                     );
                 }
             },
             DownloadProtocol::Video => {
