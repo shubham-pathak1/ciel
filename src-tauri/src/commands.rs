@@ -401,6 +401,28 @@ pub fn get_category_from_filename(filename: &str) -> String {
     }
 }
 
+fn serialize_torrent_indices_metadata(indices: &Option<Vec<usize>>) -> Option<String> {
+    indices.as_ref().and_then(|idxs| {
+        serde_json::to_string(&serde_json::json!({ "indices": idxs })).ok()
+    })
+}
+
+fn parse_torrent_indices_metadata(metadata: &str) -> Option<Vec<usize>> {
+    // Legacy format support: raw JSON array like [0,1,2]
+    if let Ok(v) = serde_json::from_str::<Vec<usize>>(metadata) {
+        return Some(v);
+    }
+
+    // Current canonical format: {"indices":[...]}
+    let json = serde_json::from_str::<serde_json::Value>(metadata).ok()?;
+    let arr = json.get("indices").and_then(|v| v.as_array())?;
+    Some(
+        arr.iter()
+            .filter_map(|v| v.as_u64().map(|n| n as usize))
+            .collect(),
+    )
+}
+
 
 /// Triggers post-transfer logic like opening the target folder or system power management.
 /// 
@@ -659,7 +681,7 @@ pub async fn add_torrent<R: Runtime>(
         completed_at: None,
         error_message: None,
         info_hash: None,
-        metadata: indices.as_ref().and_then(|idxs| serde_json::to_string(idxs).ok()),
+        metadata: serialize_torrent_indices_metadata(&indices),
         user_agent: None,
         cookies: None,
         category: "Other".to_string(),
@@ -952,14 +974,10 @@ pub async fn resume_download<R: Runtime>(
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 
-                // Extract indices from metadata if present
-                let indices = if let Some(meta_str) = &download.metadata {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(meta_str) {
-                         json["indices"].as_array().map(|arr| {
-                             arr.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect::<Vec<usize>>()
-                         })
-                    } else { None }
-                } else { None };
+                let indices = download
+                    .metadata
+                    .as_ref()
+                    .and_then(|meta_str| parse_torrent_indices_metadata(meta_str));
 
                 torrent_manager.add_magnet(
                     app, 
@@ -1332,8 +1350,10 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
                 let path = Path::new(&next_download.filepath);
                 let base_folder = path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string();
                 
-                let indices: Option<Vec<usize>> = next_download.metadata.as_ref()
-                    .and_then(|m| serde_json::from_str(m).ok());
+                let indices: Option<Vec<usize>> = next_download
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| parse_torrent_indices_metadata(m));
 
                 if let Err(e) = torrent_manager.add_magnet(
                     app.clone(), 
