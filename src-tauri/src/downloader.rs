@@ -372,19 +372,26 @@ impl Downloader {
 
         // If no chunks, calculate them
         if chunks.is_empty() {
-            let connections = self.config.connections as u64;
-            // Use even more chunks than workers for better distribution (8x)
-            let num_chunks = connections * 8; 
-            let chunk_size = total_size / num_chunks;
+            let connections = self.config.connections.max(1) as u64;
+            // Use more chunks than workers for better distribution (8x),
+            // but never exceed total bytes to avoid zero-sized chunks.
+            let desired_chunks = connections.saturating_mul(8);
+            let num_chunks = desired_chunks.min(total_size).max(1);
+            let base_chunk_size = total_size / num_chunks;
+            let remainder = total_size % num_chunks;
             let mut db_chunks_to_insert = Vec::new();
+            let mut cursor = 0u64;
 
             for i in 0..num_chunks {
-                let mut start = i * chunk_size;
-                let end = if i == num_chunks - 1 {
-                    total_size - 1
-                } else {
-                    (i + 1) * chunk_size - 1
-                };
+                // Distribute remainder so each chunk has at least 1 byte.
+                let this_chunk_size = base_chunk_size + if i < remainder { 1 } else { 0 };
+                if this_chunk_size == 0 {
+                    continue;
+                }
+
+                let mut start = cursor;
+                let end = start + this_chunk_size - 1;
+                cursor = end + 1;
 
                 // Cap individual chunks at 10MB to prevent single long requests when throttled.
                 // This ensures that even on slow connections, we keep cycling through requests and updating DB.
