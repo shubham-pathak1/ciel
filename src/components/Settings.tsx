@@ -76,7 +76,7 @@ export function Settings() {
             const selected = await open({
                 directory: true,
                 multiple: false,
-                defaultPath: settings.download_path,
+                defaultPath: localSettings.download_path,
             });
 
             if (selected) {
@@ -149,7 +149,7 @@ export function Settings() {
                             <div className="flex gap-3">
                                 <input
                                     type="text"
-                                    value={settings.download_path}
+                                    value={localSettings.download_path}
                                     onChange={(e) => handleChange("download_path", e.target.value)}
                                     className="flex-1 bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-sm text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono"
                                 />
@@ -168,15 +168,15 @@ export function Settings() {
                             description="Select download location manually for every new task."
                         >
                             <SettingToggle
-                                enabled={settings.ask_location}
-                                onToggle={() => handleChange("ask_location", !settings.ask_location)}
+                                enabled={localSettings.ask_location}
+                                onToggle={() => handleChange("ask_location", !localSettings.ask_location)}
                             />
                         </SettingItem>
                     </div>
                 );
             case "network":
                 const displayLimit = (() => {
-                    const b = parseInt(settings.speed_limit);
+                    const b = parseInt(localSettings.speed_limit);
                     if (b === 0) return { val: "", unit: "MB/s" };
                     if (b < 1048576) return { val: (b / 1024).toFixed(0), unit: "KB/s" };
                     return { val: (b / 1048576).toFixed(0), unit: "MB/s" };
@@ -224,7 +224,7 @@ export function Settings() {
                                         <option value="MB/s">MB/s</option>
                                     </select>
                                 </div>
-                                {settings.speed_limit !== "0" && (
+                                {localSettings.speed_limit !== "0" && (
                                     <button
                                         onClick={() => handleChange("speed_limit", "0")}
                                         className="px-4 py-2.5 bg-brand-tertiary hover:bg-brand-tertiary/80 text-text-tertiary hover:text-text-primary text-xs font-medium rounded-lg border border-surface-border transition-all"
@@ -277,17 +277,17 @@ export function Settings() {
                                     type="range"
                                     min="1"
                                     max="64"
-                                    value={settings.max_connections}
+                                    value={localSettings.max_connections}
                                     onChange={(e) => handleChange("max_connections", e.target.value)}
                                     className="flex-1 h-2 bg-brand-tertiary rounded-lg appearance-none cursor-pointer accent-text-primary"
                                 />
                                 <div className="w-16 h-10 flex items-center justify-center bg-brand-secondary rounded-lg border border-surface-border text-text-primary font-bold font-mono">
-                                    {settings.max_connections}
+                                    {localSettings.max_connections}
                                 </div>
                             </div>
                             <div className="space-y-2">
                                 <p className="text-xs text-text-tertiary font-medium">Number of parallel streams used to pull a single file faster.</p>
-                                {parseInt(settings.max_connections) > 32 && (
+                                {parseInt(localSettings.max_connections) > 32 && (
                                     <div className="flex items-start gap-2 p-3 rounded bg-status-error/10 border border-status-error/20 text-status-error text-[10px] leading-relaxed">
                                         <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
                                         <p>
@@ -305,12 +305,12 @@ export function Settings() {
                                     type="range"
                                     min="1"
                                     max="10"
-                                    value={settings.max_concurrent}
+                                    value={localSettings.max_concurrent}
                                     onChange={(e) => handleChange("max_concurrent", e.target.value)}
                                     className="flex-1 h-2 bg-brand-tertiary rounded-lg appearance-none cursor-pointer accent-text-primary"
                                 />
                                 <div className="w-16 h-10 flex items-center justify-center bg-brand-secondary rounded-lg border border-surface-border text-text-primary font-bold font-mono">
-                                    {settings.max_concurrent}
+                                    {localSettings.max_concurrent}
                                 </div>
                             </div>
                             <p className="text-xs text-text-tertiary font-medium">How many different files Ciel will download at once.</p>
@@ -321,8 +321,8 @@ export function Settings() {
                             description="Automatically resume interrupted downloads when app starts."
                         >
                             <SettingToggle
-                                enabled={settings.auto_resume}
-                                onToggle={() => handleChange("auto_resume", !settings.auto_resume)}
+                                enabled={localSettings.auto_resume}
+                                onToggle={() => handleChange("auto_resume", !localSettings.auto_resume)}
                             />
                         </SettingItem>
                     </div>
@@ -335,8 +335,8 @@ export function Settings() {
                             description="Automatically open the download folder when completed."
                         >
                             <SettingToggle
-                                enabled={settings.open_folder_on_finish}
-                                onToggle={() => handleChange("open_folder_on_finish", !settings.open_folder_on_finish)}
+                                enabled={localSettings.open_folder_on_finish}
+                                onToggle={() => handleChange("open_folder_on_finish", !localSettings.open_folder_on_finish)}
                             />
                         </SettingItem>
 
@@ -345,8 +345,8 @@ export function Settings() {
                             description="Automatically sort downloads into category-specific folders."
                         >
                             <SettingToggle
-                                enabled={settings.auto_organize}
-                                onToggle={() => handleChange("auto_organize", !settings.auto_organize)}
+                                enabled={localSettings.auto_organize}
+                                onToggle={() => handleChange("auto_organize", !localSettings.auto_organize)}
                             />
                         </SettingItem>
 
@@ -355,8 +355,8 @@ export function Settings() {
                             description="Shutdown the PC automatically after all downloads are finished."
                         >
                             <SettingToggle
-                                enabled={settings.shutdown_on_finish}
-                                onToggle={() => handleChange("shutdown_on_finish", !settings.shutdown_on_finish)}
+                                enabled={localSettings.shutdown_on_finish}
+                                onToggle={() => handleChange("shutdown_on_finish", !localSettings.shutdown_on_finish)}
                             />
                         </SettingItem>
 
@@ -409,7 +409,7 @@ export function Settings() {
                             <label className="text-sm font-semibold text-text-secondary uppercase tracking-wider">Browser Authentication</label>
                             <div className="relative">
                                 <select
-                                    value={settings.cookie_browser}
+                                    value={localSettings.cookie_browser}
                                     onChange={(e) => handleChange("cookie_browser", e.target.value)}
                                     className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-sm text-text-primary appearance-none focus:outline-none focus:border-text-secondary transition-all cursor-pointer"
                                 >
@@ -433,8 +433,8 @@ export function Settings() {
                             description="Automatically detect URLs in your clipboard."
                         >
                             <SettingToggle
-                                enabled={settings.autocatch_enabled}
-                                onToggle={() => handleChange("autocatch_enabled", !settings.autocatch_enabled)}
+                                enabled={localSettings.autocatch_enabled}
+                                onToggle={() => handleChange("autocatch_enabled", !localSettings.autocatch_enabled)}
                             />
                         </SettingItem>
 
