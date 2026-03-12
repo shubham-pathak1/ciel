@@ -4,7 +4,7 @@
  * Orchestrates HTTP, Torrent, and Video downloads by communicating with the Tauri backend.
  */
 
-import React, { useState, useEffect, useCallback, memo } from "react";
+import React, { useState, useEffect, useCallback, useRef, memo } from "react";
 import { CloudDownload, FileDown, Pause, Trash2, FolderOpen, Play, ArrowDown, Clock, Users, Wifi, Database as DatabaseIcon, ChevronDown } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -48,6 +48,8 @@ interface DownloadItem {
     url: string;
     size: number;
     downloaded: number;
+    network_received?: number;
+    verified_speed?: number;
     speed: number;
     eta: number;
     connections: number;
@@ -55,6 +57,9 @@ interface DownloadItem {
     status: "downloading" | "paused" | "completed" | "queued" | "error";
     filepath: string;
     status_text?: string;
+    status_phase?: string;
+    phase_elapsed_secs?: number;
+    error_message?: string | null;
     metadata: string | null;
     user_agent: string | null;
     cookies: string | null;
@@ -65,10 +70,14 @@ interface ProgressPayload {
     id: string;
     total: number;
     downloaded: number;
+    network_received?: number;
+    verified_speed?: number;
     speed: number;
     eta: number;
     connections: number;
     status_text?: string;
+    status_phase?: string;
+    phase_elapsed_secs?: number;
 }
 
 const formatSize = (bytes: number) => {
@@ -93,6 +102,35 @@ const formatEta = (seconds: number) => {
     return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 };
 
+const formatPhaseElapsed = (seconds?: number) => {
+    if (seconds === undefined || seconds < 0 || !isFinite(seconds)) return "";
+    if (seconds < 60) return `${Math.floor(seconds)}s`;
+    return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+};
+
+const getPhaseHint = (phase?: string) => {
+    switch (phase) {
+        case "restoring_session":
+            return "restoring";
+        case "resuming":
+            return "resuming";
+        case "verifying_data":
+            return "checking files";
+        case "finding_peers":
+            return "searching peers";
+        case "connecting":
+            return "connecting";
+        case "negotiating_peers":
+            return "negotiating peers";
+        case "preparing_first_piece":
+            return "receiving data";
+        case "fetching_metadata":
+            return "loading metadata";
+        default:
+            return "";
+    }
+};
+
 /**
  * Main Download Queue Component.
  * 
@@ -107,6 +145,8 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
     const [autocatchUrl, setAutocatchUrl] = useState("");
     const [sortBy, setSortBy] = useState<"date" | "name" | "size" | "progress">("date");
+    const hasAutoResumed = useRef(false);
+    const hasStartupReconciled = useRef(false);
 
     /**
      * Refreshes the download list and handles the "Auto-Resume" feature.
@@ -119,15 +159,74 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
                 invoke<DownloadItem[]>("get_downloads"),
                 invoke<{ auto_resume?: string }>("get_settings")
             ]);
-            setDownloads(downloads);
+            const hydratedDownloads = downloads.map((d) => ({
+                ...d,
+                verified_speed: d.protocol === "torrent" ? 0 : d.speed,
+                status_text:
+                    d.status === "error"
+                        ? d.status_text ?? d.error_message ?? "Download failed"
+                        : d.status === "downloading"
+                            ? d.status_text ?? "Restoring session..."
+                        : d.status_text,
+                status_phase:
+                    d.status === "downloading"
+                        ? d.status_phase ?? "restoring_session"
+                        : d.status_phase,
+                phase_elapsed_secs:
+                    d.status === "downloading"
+                        ? d.phase_elapsed_secs ?? 0
+                        : d.phase_elapsed_secs,
+            }));
+            setDownloads(hydratedDownloads);
 
-            // Auto-resume logic: if app was closed while downloading, resume them
-            if (settings.auto_resume === "true") {
-                downloads.forEach((d) => {
+            // Auto-resume should happen once per app load, and sequentially.
+            // Flooding resume calls at startup increases contention and can slow
+            // torrent initialization when multiple items are marked "downloading".
+            if (settings.auto_resume === "true" && !hasAutoResumed.current) {
+                hasAutoResumed.current = true;
+                for (const d of downloads) {
                     if (d.status === "downloading") {
-                        invoke("resume_download", { id: d.id }).catch(console.error);
+                        setDownloads((prev) =>
+                            prev.map((item) =>
+                                item.id === d.id
+                                    ? {
+                                        ...item,
+                                        status: "downloading",
+                                        status_text: "Restoring session...",
+                                        status_phase: "restoring_session",
+                                        phase_elapsed_secs: 0,
+                                    }
+                                    : item
+                            )
+                        );
+                        await invoke("resume_download", { id: d.id }).catch(console.error);
+                        await new Promise((resolve) => setTimeout(resolve, 250));
                     }
-                });
+                }
+            }
+
+            // Reconcile stale "downloading" records once even when auto-resume is disabled.
+            // This prevents a reopen state where items look live but are not actually progressing.
+            if (!hasStartupReconciled.current && settings.auto_resume !== "true") {
+                hasStartupReconciled.current = true;
+                const staleActive = downloads.filter((d) => d.status === "downloading");
+                for (const d of staleActive) {
+                    setDownloads((prev) =>
+                        prev.map((item) =>
+                            item.id === d.id
+                                ? {
+                                    ...item,
+                                    status: "downloading",
+                                    status_text: "Restoring session...",
+                                    status_phase: "restoring_session",
+                                    phase_elapsed_secs: 0,
+                                }
+                                : item
+                        )
+                    );
+                    await invoke("resume_download", { id: d.id }).catch(console.error);
+                    await new Promise((resolve) => setTimeout(resolve, 250));
+                }
             }
         } catch (err) {
             console.error("Failed to fetch downloads:", err);
@@ -157,12 +256,16 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
                         return {
                             ...d,
                             downloaded: progress.downloaded,
+                            network_received: progress.network_received ?? progress.downloaded,
+                            verified_speed: progress.verified_speed ?? progress.speed,
                             size: progress.total,
                             speed: progress.speed,
                             eta: progress.eta,
                             connections: progress.connections,
-                            status: progress.status_text === "Paused" ? "paused" : "downloading",
+                            status: progress.status_text === "Paused" || progress.status_phase === "paused" ? "paused" : "downloading",
                             status_text: progress.status_text,
+                            status_phase: progress.status_phase,
+                            phase_elapsed_secs: progress.phase_elapsed_secs,
                         };
                     }
                     return d;
@@ -243,7 +346,7 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
 
     return (
         <div className="flex flex-col h-full bg-brand-primary relative overflow-hidden">
-            <div className="p-8 pb-4 flex items-center justify-between relative z-10">
+            <div className="px-8 pt-5 pb-3 flex items-center justify-between relative z-10">
                 <div className="flex flex-col gap-1">
                     <h1 className="text-2xl font-bold text-text-primary tracking-tight flex items-center gap-2">
                         {category ? `${category} Downloads` : filter === "active" ? "Active Downloads" : "All Downloads"}
@@ -277,7 +380,7 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
             </div>
 
             {/* Sort Dropdown */}
-            <div className="px-8 pb-4 flex items-center justify-end">
+            <div className="px-8 pb-3 flex items-center justify-end">
                 <div className="relative">
                     <select
                         value={sortBy}
@@ -361,6 +464,38 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
         const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
         const [deleteFiles, setDeleteFiles] = useState(download.status !== 'completed');
         const [isDeleting, setIsDeleting] = useState(false);
+        const statusText = download.status_text ?? "";
+        const statusPhase = download.status_phase ?? "";
+        const isPreparingFirstPiece =
+            statusPhase === "preparing_first_piece" ||
+            statusText.toLowerCase().includes("preparing first piece");
+        const isIndeterminateStatus =
+            statusText === "Initializing..." ||
+            statusText === "Fetching Metadata..." ||
+            statusText.includes("Restoring") ||
+            statusText.includes("Verifying") ||
+            statusText.includes("Finding peers") ||
+            statusText.includes("Connecting") ||
+            statusText.includes("Negotiating") ||
+            isPreparingFirstPiece;
+        const shouldRenderStatusLine =
+            statusText.includes("Initializing") ||
+            statusText.includes("Metadata") ||
+            statusText.includes("Restoring") ||
+            statusText.includes("Verifying") ||
+            statusText.includes("Finding peers") ||
+            statusText.includes("Negotiating") ||
+            statusText === "Paused" ||
+            statusText === "Pausing..." ||
+            statusText === "Resuming..." ||
+            statusText.includes("Connecting") ||
+            statusText.includes("Oops") ||
+            isPreparingFirstPiece;
+        const networkReceived = Math.max(download.network_received ?? download.downloaded, download.downloaded);
+        const hasNetworkAheadOfVerified = networkReceived > download.downloaded + 256 * 1024;
+        const verifiedSpeed = download.verified_speed ?? download.speed;
+        const shouldShowDualSpeed =
+            download.protocol === "torrent" && (isPreparingFirstPiece || hasNetworkAheadOfVerified);
 
         useEffect(() => {
             setVisualProgress(progress);
@@ -370,13 +505,47 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
             e.stopPropagation();
             try {
                 if (download.status === "downloading") {
+                    setDownloads((prev) =>
+                        prev.map((d) =>
+                            d.id === download.id
+                                ? {
+                                    ...d,
+                                    status: "paused",
+                                    speed: 0,
+                                    status_text: "Pausing...",
+                                    status_phase: "paused",
+                                    phase_elapsed_secs: 0,
+                                }
+                                : d
+                        )
+                    );
                     await invoke("pause_download", { id: download.id });
                 } else {
+                    setDownloads((prev) =>
+                        prev.map((d) =>
+                            d.id === download.id
+                                ? {
+                                    ...d,
+                                    status: "downloading",
+                                    status_text: "Restoring session...",
+                                    status_phase: "restoring_session",
+                                    phase_elapsed_secs: 0,
+                                }
+                                : d
+                        )
+                    );
                     await invoke("resume_download", { id: download.id });
                 }
             } catch (err) {
                 console.error("Action failed:", err);
-                // Revert on failure
+                const message = err instanceof Error ? err.message : String(err);
+                setDownloads((prev) =>
+                    prev.map((d) =>
+                        d.id === download.id
+                            ? { ...d, status: "error", status_text: message }
+                            : d
+                    )
+                );
                 onRefresh();
             }
         };
@@ -431,15 +600,15 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                     layout
                     className={clsx(
                         "absolute inset-0 z-0 pointer-events-none transition-colors",
-                        download.status_text === "Initializing..." || download.status_text === "Fetching Metadata..."
+                        isIndeterminateStatus
                             ? "bg-text-primary/10"
                             : "bg-brand-tertiary/20"
                     )}
-                    style={{ width: download.status_text === "Initializing..." || download.status_text === "Fetching Metadata..." ? "100%" : `${visualProgress}%` }}
-                    animate={download.status_text === "Initializing..." || download.status_text === "Fetching Metadata..." ? {
+                    style={{ width: isIndeterminateStatus ? "100%" : `${visualProgress}%` }}
+                    animate={isIndeterminateStatus ? {
                         opacity: [0.3, 0.6, 0.3]
                     } : { opacity: 1 }}
-                    transition={download.status_text === "Initializing..." || download.status_text === "Fetching Metadata..." ? {
+                    transition={isIndeterminateStatus ? {
                         duration: 2, repeat: Infinity, ease: "easeInOut"
                     } : { type: "spring", stiffness: 400, damping: 40 }}
                 />
@@ -476,11 +645,11 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                     "h-full rounded-full transition-all duration-500",
                                     download.status === 'completed' ? 'bg-status-success' :
                                         download.status === 'error' ? 'bg-status-error' :
-                                            download.status_text && (download.status_text.includes("Metadata") || download.status_text === "Initializing...") && download.size === 0
+                                            (isPreparingFirstPiece || (isIndeterminateStatus && download.size === 0))
                                                 ? 'bg-brand-primary animate-progress-indeterminate bg-[length:1rem_1rem] bg-gradient-to-r from-brand-primary via-brand-secondary to-brand-primary'
                                                 : 'bg-text-primary'
                                 )}
-                                style={{ width: `${download.status_text && (download.status_text.includes("Metadata") || download.status_text === "Initializing...") && download.size === 0 ? 100 : visualProgress}%` }}
+                                style={{ width: `${isPreparingFirstPiece || (isIndeterminateStatus && download.size === 0) ? 100 : visualProgress}%` }}
                                 transition={{ type: "spring", stiffness: 400, damping: 40 }}
                             />
                         </div>
@@ -493,7 +662,7 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                             {download.status_text}
                                         </span>
                                     </div>
-                                ) : download.status_text && (download.status_text.includes("Initializing") || download.status_text.includes("Metadata") || download.status_text === "Paused" || download.status_text === "Resuming..." || download.status_text.includes("Connecting") || download.status_text.includes("Oops")) ? (
+                                ) : download.status_text && shouldRenderStatusLine ? (
                                     <div className="flex items-center gap-2">
                                         {download.status_text !== "Paused" && !download.status_text.includes("Oops") && <div className="w-1.5 h-1.5 rounded-full bg-text-primary animate-pulse" />}
                                         <span className={clsx("font-bold uppercase tracking-widest text-[9px]",
@@ -502,6 +671,21 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                         )}>
                                             {download.status_text}
                                         </span>
+                                        {download.status_text !== "Paused" && (
+                                            <span className="font-mono text-[9px] text-text-tertiary">
+                                                {formatPhaseElapsed(download.phase_elapsed_secs)}
+                                            </span>
+                                        )}
+                                        {getPhaseHint(download.status_phase) && (
+                                            <span className="text-[9px] uppercase tracking-wider text-text-tertiary">
+                                                {getPhaseHint(download.status_phase)}
+                                            </span>
+                                        )}
+                                        {(isPreparingFirstPiece || hasNetworkAheadOfVerified) && (
+                                            <span className="text-[9px] uppercase tracking-wider text-text-tertiary">
+                                                RX {formatSize(networkReceived)} | Verified {formatSize(download.downloaded)}
+                                            </span>
+                                        )}
                                     </div>
                                 ) : (
                                     <span className="font-medium tracking-wide">
@@ -513,7 +697,17 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                     <>
                                         <div className="flex items-center gap-1 text-text-primary">
                                             <ArrowDown size={10} />
-                                            <span>{formatSpeed(download.speed)}</span>
+                                            {shouldShowDualSpeed ? (
+                                                <span className="flex items-center gap-1">
+                                                    <span className="text-[9px] uppercase tracking-wider text-text-tertiary">RX</span>
+                                                    <span>{formatSpeed(download.speed)}</span>
+                                                    <span className="text-text-tertiary">|</span>
+                                                    <span className="text-[9px] uppercase tracking-wider text-text-tertiary">Verified</span>
+                                                    <span>{formatSpeed(verifiedSpeed)}</span>
+                                                </span>
+                                            ) : (
+                                                <span>{formatSpeed(download.speed)}</span>
+                                            )}
                                         </div>
                                         <div className="flex items-center gap-1 text-text-tertiary">
                                             {download.protocol === 'torrent' ? <Users size={10} /> : <Wifi size={10} />}
@@ -792,6 +986,8 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                 filename: torrentInfo?.name || "Torrent",
                 filepath: "",
                 indices,
+                analysisId: torrentInfo?.id || null,
+                totalSize: torrentInfo?.total_size || null,
                 outputFolder: output_folder || null,
                 startPaused
             });
