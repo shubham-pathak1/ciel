@@ -423,6 +423,35 @@ fn parse_torrent_indices_metadata(metadata: &str) -> Option<Vec<usize>> {
     )
 }
 
+fn parse_optional_torrent_indices_metadata(metadata: &Option<String>) -> Result<Option<Vec<usize>>, String> {
+    match metadata {
+        None => Ok(None),
+        Some(raw) => {
+            let parsed = parse_torrent_indices_metadata(raw)
+                .ok_or_else(|| "Torrent selection metadata is invalid. Please re-add this torrent.".to_string())?;
+            if parsed.is_empty() {
+                return Err("No files are selected for this torrent task.".to_string());
+            }
+            Ok(Some(parsed))
+        }
+    }
+}
+
+fn emit_download_error_event<R: Runtime>(app: &AppHandle<R>, id: &str, message: &str) {
+    let _ = app.emit(
+        "download-error",
+        serde_json::json!({
+            "id": id,
+            "message": message
+        }),
+    );
+}
+
+fn set_and_emit_download_error<R: Runtime>(app: &AppHandle<R>, db_path: &str, id: &str, message: &str) {
+    let _ = db::update_download_error(db_path, id, message);
+    emit_download_error_event(app, id, message);
+}
+
 
 /// Triggers post-transfer logic like opening the target folder or system power management.
 /// 
@@ -623,6 +652,8 @@ pub async fn add_torrent<R: Runtime>(
     _filepath: String,
     output_folder: Option<String>,
     indices: Option<Vec<usize>>,
+    analysis_id: Option<String>,
+    total_size: Option<u64>,
     start_paused: Option<bool>,
 ) -> Result<Download, String> {
     let is_magnet = url.starts_with("magnet:");
@@ -665,7 +696,7 @@ pub async fn add_torrent<R: Runtime>(
         url: url.clone(),
         filename: final_filename,
         filepath: final_resolved_path.clone(),
-        size: 0,
+        size: total_size.unwrap_or(0) as i64,
         downloaded: 0,
         status: if start_paused.unwrap_or(false) { 
             DownloadStatus::Paused 
@@ -710,10 +741,53 @@ pub async fn add_torrent<R: Runtime>(
     } else {
         Path::new(&final_resolved_path).parent().unwrap_or(Path::new(".")).to_string_lossy().to_string()
     };
+
+    let source_torrent_bytes = if !should_queue {
+        if let Some(analysis_id) = analysis_id.as_ref() {
+            torrent_manager.consume_analysis_bytes(analysis_id).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     
     // Only start if not paused and not queued
     if !should_queue {
-        torrent_manager.add_magnet(app, id.clone(), url, base_folder, db_state.path.clone(), indices, 0, false, start_paused.unwrap_or(false)).await?;
+        let _ = app.emit("download-progress", serde_json::json!({
+            "id": id,
+            "total": download.size.max(0) as u64,
+            "downloaded": 0u64,
+            "network_received": 0u64,
+            "verified_speed": 0u64,
+            "speed": 0u64,
+            "eta": 0u64,
+            "connections": 0u64,
+            "status_text": "Initializing...",
+            "status_phase": "initializing",
+            "phase_elapsed_secs": 0u64,
+        }));
+
+        if !torrent_manager.wait_until_ready(30000).await {
+            let msg = "Torrent engine is still initializing. Please retry in a few seconds.".to_string();
+            set_and_emit_download_error(&app, &db_state.path, &id, &msg);
+            return Err(msg);
+        }
+
+        torrent_manager
+            .add_magnet(
+                app,
+                id.clone(),
+                url,
+                base_folder,
+                db_state.path.clone(),
+                indices,
+                download.size as u64,
+                false,
+                start_paused.unwrap_or(false),
+                source_torrent_bytes,
+            )
+            .await?;
     }
 
     Ok(download)
@@ -849,14 +923,8 @@ async fn start_download_task<R: Runtime>(
                         execute_post_download_actions(app.clone(), db_path_inner.clone(), download_clone).await;
                     }
                     Err(e) => {
-                        let _ = db::update_download_status(&db_path_inner, &id_inner, DownloadStatus::Error);
-                        let _ = app.emit(
-                            "download-error",
-                            serde_json::json!({
-                                "id": id_inner.clone(),
-                                "message": e.to_string()
-                            }),
-                        );
+                        let err_msg = e.to_string();
+                        set_and_emit_download_error(&app, &db_path_inner, &id_inner, &err_msg);
 
                         // Native Notification
                         app.notification()
@@ -914,10 +982,14 @@ pub async fn pause_download<R: Runtime>(
         "id": id,
         "total": download.size,
         "downloaded": download.downloaded,
+        "network_received": download.downloaded,
+        "verified_speed": 0u64,
         "speed": 0,
         "eta": 0,
         "connections": 0,
         "status_text": "Paused",
+        "status_phase": "paused",
+        "phase_elapsed_secs": 0,
     }));
 
     Ok(())
@@ -964,9 +1036,43 @@ pub async fn resume_download<R: Runtime>(
 
     match download.protocol {
         DownloadProtocol::Torrent => {
+            println!(
+                "[Torrent][Resume][{}] requested status_before={} downloaded={} total={}",
+                id,
+                download.status.as_str(),
+                download.downloaded.max(0),
+                download.size.max(0)
+            );
+            let _ = app.emit("download-progress", serde_json::json!({
+                "id": id,
+                "total": download.size.max(0) as u64,
+                "downloaded": download.downloaded.max(0) as u64,
+                "network_received": download.downloaded.max(0) as u64,
+                "verified_speed": 0u64,
+                "speed": 0u64,
+                "eta": 0u64,
+                "connections": 0u64,
+                "status_text": "Restoring session...",
+                "status_phase": "restoring_session",
+                "phase_elapsed_secs": 0u64,
+            }));
+
+            if !torrent_manager.wait_until_ready(30000).await {
+                println!("[Torrent][Resume][{}] engine_not_ready timeout_ms=30000", id);
+                let msg = "Torrent engine is still initializing. Please wait a moment and try again.".to_string();
+                set_and_emit_download_error(&app, &db_state.path, &id, &msg);
+                return Err(msg);
+            }
+
             // Try to resume existing in-memory session first.
-            if torrent_manager.is_active(&id).await {
-                torrent_manager.resume_torrent(&id).await?;
+            let in_memory_active = torrent_manager.is_active(&id).await;
+            if in_memory_active {
+                println!("[Torrent][Resume][{}] path=in_memory_handle", id);
+                if let Err(e) = torrent_manager.resume_torrent(&id).await {
+                    let msg = format!("Failed to resume torrent: {}", e);
+                    set_and_emit_download_error(&app, &db_state.path, &id, &msg);
+                    return Err(msg);
+                }
             } else {
                 // If it wasn't in the active session map (e.g. app restart), re-add it.
                 // It will automatically verify existing files and resume.
@@ -974,25 +1080,52 @@ pub async fn resume_download<R: Runtime>(
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 
-                let indices = download
-                    .metadata
-                    .as_ref()
-                    .and_then(|meta_str| parse_torrent_indices_metadata(meta_str));
+                let indices = match parse_optional_torrent_indices_metadata(&download.metadata) {
+                    Ok(v) => v,
+                    Err(msg) => {
+                        set_and_emit_download_error(&app, &db_state.path, &id, &msg);
+                        return Err(msg);
+                    }
+                };
+                println!(
+                    "[Torrent][Resume][{}] path=readd_to_session selected_files={} output_folder={}",
+                    id,
+                    indices.as_ref().map(|v| v.len()).unwrap_or(0),
+                    output_folder
+                );
 
-                torrent_manager.add_magnet(
-                    app, 
-                    id, 
-                    download.url, 
-                    output_folder, 
-                    db_state.path.clone(), 
+                if let Err(e) = torrent_manager.add_magnet(
+                    app.clone(),
+                    id.clone(),
+                    download.url,
+                    output_folder,
+                    db_state.path.clone(),
                     indices,
                     download.size as u64,
                     true,
-                    false
-                ).await?;
+                    false,
+                    None,
+                ).await {
+                    let msg = format!("Failed to resume torrent: {}", e);
+                    set_and_emit_download_error(&app, &db_state.path, &id, &msg);
+                    return Err(msg);
+                }
             }
         }
         _ => {
+            let _ = app.emit("download-progress", serde_json::json!({
+                "id": id,
+                "total": download.size.max(0) as u64,
+                "downloaded": download.downloaded.max(0) as u64,
+                "network_received": download.downloaded.max(0) as u64,
+                "verified_speed": 0u64,
+                "speed": 0u64,
+                "eta": 0u64,
+                "connections": download.connections.max(0) as u64,
+                "status_text": "Resuming...",
+                "status_phase": "resuming",
+                "phase_elapsed_secs": 0u64,
+            }));
             start_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
         }
     }
@@ -1336,24 +1469,26 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
             DownloadProtocol::Http => {
                 if let Err(e) = start_download_task(app.clone(), db_state.path.clone(), manager.inner().clone(), next_download).await {
                      eprintln!("Failed to start queued HTTP download {}: {}", id, e);
-                     let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Error);
-                     let _ = app.emit(
-                         "download-error",
-                         serde_json::json!({
-                             "id": id,
-                             "message": e
-                         }),
-                     );
+                     set_and_emit_download_error(&app, &db_state.path, &id, &e);
                 }
             },
             DownloadProtocol::Torrent => {
                 let path = Path::new(&next_download.filepath);
                 let base_folder = path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string();
-                
-                let indices: Option<Vec<usize>> = next_download
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| parse_torrent_indices_metadata(m));
+
+                let indices = match parse_optional_torrent_indices_metadata(&next_download.metadata) {
+                    Ok(v) => v,
+                    Err(msg) => {
+                        set_and_emit_download_error(&app, &db_state.path, &id, &msg);
+                        continue;
+                    }
+                };
+
+                if !torrent_manager.wait_until_ready(30000).await {
+                    eprintln!("Queue Processor: torrent engine still initializing; will retry {}", id);
+                    let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Queued);
+                    break;
+                }
 
                 if let Err(e) = torrent_manager.add_magnet(
                     app.clone(), 
@@ -1362,19 +1497,13 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
                     base_folder, 
                     db_state.path.clone(), 
                     indices, 
-                    0, 
+                    next_download.size as u64, 
                     true, // is_resume
-                    false // start_paused
+                    false, // start_paused
+                    None,
                 ).await {
                      eprintln!("Failed to start queued torrent {}: {}", id, e);
-                     let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Error);
-                     let _ = app.emit(
-                         "download-error",
-                         serde_json::json!({
-                             "id": id,
-                             "message": e
-                         }),
-                     );
+                     set_and_emit_download_error(&app, &db_state.path, &id, &e);
                 }
             },
             DownloadProtocol::Video => {
