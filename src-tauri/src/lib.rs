@@ -118,11 +118,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Registration of all commands exposed via tauri.invoke()
             commands::get_downloads,
-            commands::add_download,
-            commands::add_torrent,
-            commands::analyze_torrent,
-            commands::validate_url_type,
-            commands::start_selective_torrent,
+            commands::http::add_download,
+            commands::torrent::add_torrent,
+            commands::torrent::analyze_torrent,
+            commands::http::validate_url_type,
+            commands::torrent::start_selective_torrent,
             commands::pause_download,
             commands::resume_download,
             commands::delete_download,
