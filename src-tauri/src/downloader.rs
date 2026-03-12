@@ -167,6 +167,10 @@ pub struct DownloadProgress {
     pub speed_limit: u64,
     /// Detailed status message (e.g., "Initializing...", "Connecting...", "Fetching Metadata").
     pub status_text: Option<String>,
+    /// Machine-readable phase key for UI/telemetry.
+    pub status_phase: Option<String>,
+    /// Seconds elapsed in the current phase.
+    pub phase_elapsed_secs: Option<u64>,
     /// Discovered filename (emitted if it differs from the initial generic one).
     pub filename: Option<String>,
 }
@@ -221,6 +225,8 @@ impl Downloader {
             connections: config.connections,
             speed_limit: config.speed_limit,
             status_text: None,
+            status_phase: None,
+            phase_elapsed_secs: None,
             filename: None,
         }));
 
@@ -317,6 +323,8 @@ impl Downloader {
         on_progress({
             let mut p = self.progress.lock().unwrap().clone();
             p.status_text = Some("Initializing...".to_string());
+            p.status_phase = Some("initializing".to_string());
+            p.phase_elapsed_secs = Some(0);
             p
         });
         
@@ -342,6 +350,8 @@ impl Downloader {
             p.total = total_size;
             p.filename = filename_opt;
             p.status_text = Some("Downloading...".to_string());
+            p.status_phase = Some("downloading".to_string());
+            p.phase_elapsed_secs = Some(0);
         }
 
         if !supports_range || total_size == 0 {
@@ -725,6 +735,8 @@ impl Downloader {
         {
             let mut p = self.progress.lock().unwrap();
             p.status_text = Some("Downloading...".to_string());
+            p.status_phase = Some("downloading".to_string());
+            p.phase_elapsed_secs = Some(0);
         }
         (on_progress)(self.progress.lock().unwrap().clone());
 

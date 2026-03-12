@@ -40,59 +40,51 @@ pub fn run() {
             tray::show_or_create_window(app);
         }))
         .setup(|app| {
-            // DATABASE INITIALIZATION
-            // We resolve the app data directory to store the SQLite database.
             let app_handle = app.handle().clone();
-            let db_path = app_handle
-                .path()
-                .app_data_dir()
-                .expect("Failed to get app data dir")
-                .join("ciel.db");
+            
+            // 1. Resolve Paths (CPU only - very fast)
+            let app_data_path = app_handle.path().app_data_dir()
+                .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+            let db_path = app_data_path.join("ciel.db");
+            let torrent_session_dir = app_data_path.join("torrents");
 
-            // Ensure parent directory exists before opening the connection
-            if let Some(parent) = db_path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-
-            // init_db creates tables and handles schema migrations
-            db::init_db(&db_path).expect("Failed to initialize database");
-
-            // Store db path in app state for easy access in Tauri commands
+            // 2. Immediate State Management (Zero I/O)
             app.manage(db::DbState {
                 path: db_path.to_string_lossy().to_string(),
             });
-
-            // STATE MANAGEMENT
-            // Initialize the HTTP download manager
             app.manage(commands::DownloadManager::new());
             
-            // Resolve torrent settings before initializing the engine
-            let force_encryption = db::get_setting(&db_path, "torrent_encryption")
-                .ok()
-                .flatten()
-                .map(|v| v == "true")
-                .unwrap_or(false);
-
-            // Initialize the BitTorrent session (async)
-            let torrent_session_dir = app_handle.path().app_data_dir().unwrap().join("torrents");
-            let torrent_manager = tauri::async_runtime::block_on(torrent::TorrentManager::new(torrent_session_dir, force_encryption))
-                .expect("Failed to initialize TorrentManager struct");
+            // Start TorrentManager with "Optimistic" defaults.
+            // It will warm up its engine in its own background task.
+            let torrent_manager = torrent::TorrentManager::new(torrent_session_dir, false);
             app.manage(torrent_manager);
 
-            // WINDOW DECORATION
-            // Apply Mica effect on Windows for a modern, glassmorphic look.
-            {
-                if let Some(window) = app.get_webview_window("main") {
+            // 3. WINDOW DECORATION (Sync - Cheap Win32 calls)
+            if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                {
                     use window_vibrancy::apply_mica;
                     let _ = apply_mica(&window, Some(true));
                 }
             }
 
-            // OS INTEGRATIONS
-            tray::create_tray(app.handle()).expect("Failed to create tray");
-            app.handle().plugin(tauri_plugin_notification::init())?;
-            clipboard::start_clipboard_monitor(app.handle().clone());
-            scheduler::start_scheduler(app.handle().clone());
+            // 4. BACKGROUND WARMUP (All heavy I/O goes here)
+            let handle = app_handle.clone();
+            let db_path_clone = db_path.clone();
+            tauri::async_runtime::spawn(async move {
+                // Ensure directories exist
+                if let Some(parent) = db_path_clone.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                // Database migrations and Tray/Clipboard/Scheduler
+                let _ = db::init_db(&db_path_clone);
+                let _ = tray::create_tray(&handle);
+                clipboard::start_clipboard_monitor(handle.clone());
+                scheduler::start_scheduler(handle.clone());
+                
+                // Note: The torrent engine has its own background init in TorrentManager::new
+            });
 
             // QUEUE MANAGEMENT
             // Listen for completion/error events to trigger the queue processor

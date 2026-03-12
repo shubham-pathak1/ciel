@@ -408,6 +408,16 @@ pub fn mark_download_completed<P: AsRef<Path>>(db_path: P, id: &str) -> SqliteRe
     Ok(())
 }
 
+/// Marks a download as failed and stores a human-readable error message.
+pub fn update_download_error<P: AsRef<Path>>(db_path: P, id: &str, message: &str) -> SqliteResult<()> {
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "UPDATE downloads SET status = 'error', error_message = ?1 WHERE id = ?2",
+        (message, id),
+    )?;
+    Ok(())
+}
+
 /// Periodically called to update the current byte count and transfer speed.
 pub fn update_download_progress<P: AsRef<Path>>(
     db_path: P,
