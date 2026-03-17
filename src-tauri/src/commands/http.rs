@@ -160,6 +160,7 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
     let response = client
         .get(&url)
         .header("Range", "bytes=0-0")
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -170,10 +171,17 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let content_length = headers
+    let content_length_from_header = headers
         .get(reqwest::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok());
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let content_length = headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split('/').last())
+        .and_then(|v| v.parse::<u64>().ok())
+        .or(content_length_from_header);
 
     let hinted_filename = Some(crate::downloader::extract_filename(&url, headers));
 
@@ -251,7 +259,7 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
         .as_deref()
         .map_or(true, |ct| ct == "application/octet-stream" || ct == "application/x-zip-compressed")
     {
-        if let Ok(range_res) = client.get(&url).header("Range", "bytes=0-3").send().await {
+        if let Ok(range_res) = client.get(&url).header("Range", "bytes=0-3").header(reqwest::header::ACCEPT_ENCODING, "identity").send().await {
             if let Ok(bytes) = range_res.bytes().await {
                 if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b && bytes[2] == 0x03 && bytes[3] == 0x04 {
                     content_type = Some("application/zip".to_string());
@@ -432,6 +440,7 @@ pub async fn add_download<R: Runtime>(
     output_folder: Option<String>,
     user_agent: Option<String>,
     mut cookies: Option<String>,
+    size: Option<u64>,
     start_paused: Option<bool>,
 ) -> Result<Download, String> {
     let url = transform_google_drive_url(&url);
@@ -491,7 +500,7 @@ pub async fn add_download<R: Runtime>(
         url: url.clone(),
         filename: final_filename,
         filepath: final_resolved_path,
-        size: 0,
+        size: size.unwrap_or(0) as i64,
         downloaded: 0,
         status: if start_paused.unwrap_or(false) {
             DownloadStatus::Paused
@@ -565,6 +574,11 @@ pub(super) async fn start_download_task<R: Runtime>(
         .flatten()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
+    let force_multi_http = db::get_setting(&db_path, "force_multi_http")
+        .ok()
+        .flatten()
+        .map(|v| v == "true")
+        .unwrap_or(false);
 
     // Spawn download in background
     tokio::spawn(async move {
@@ -592,6 +606,8 @@ pub(super) async fn start_download_task<R: Runtime>(
             speed_limit,
             user_agent: download.user_agent.clone(),
             cookies,
+            force_multi: force_multi_http,
+            size_hint: if download.size > 0 { Some(download.size as u64) } else { None },
         };
 
         let downloader = Downloader::new(config)
@@ -667,3 +683,7 @@ pub(super) async fn start_download_task<R: Runtime>(
 
     Ok(())
 }
+
+
+
+

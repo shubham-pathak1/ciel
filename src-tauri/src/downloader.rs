@@ -9,7 +9,7 @@ use std::io::Read;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncWriteExt, AsyncSeekExt, BufWriter};
-use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
+use std::sync::atomic::{AtomicU64, Ordering, AtomicBool, AtomicUsize};
 
 /// A shared token-bucket rate limiter to coordinate multiple download workers.
 /// 
@@ -136,6 +136,10 @@ pub struct DownloadConfig {
     pub user_agent: Option<String>,
     /// Optional cookies for authenticated sessions.
     pub cookies: Option<String>,
+    /// Force multi-connection even if server doesn't advertise range support.
+    pub force_multi: bool,
+    /// Optional known total size (bytes) from URL validation.
+    pub size_hint: Option<u64>,
 }
 
 impl Default for DownloadConfig {
@@ -149,6 +153,8 @@ impl Default for DownloadConfig {
             speed_limit: 0,
             user_agent: None,
             cookies: None,
+            force_multi: false,
+            size_hint: None,
         }
     }
 }
@@ -335,8 +341,24 @@ impl Downloader {
             return self.download_single_connection(on_progress).await;
         }
 
-        // 2. Discover metadata and verify segmented download support via HEAD request.
-        let (supports_range, total_size, filename_opt) = check_range_support(&self.client, &url).await?;
+        // 2. Discover metadata and verify segmented download support.
+        let (supports_range, total_size, filename_opt) = if self.config.force_multi {
+            if let Some(size) = self.config.size_hint {
+                println!(
+                    "[{}] Skipping range probe (force_multi_http enabled). size_hint={}",
+                    self.config.id, size
+                );
+                (true, size, None)
+            } else {
+                println!(
+                    "[{}] force_multi_http enabled but size unknown; falling back to single connection.",
+                    self.config.id
+                );
+                return self.download_single_connection(on_progress).await;
+            }
+        } else {
+            check_range_support(&self.client, &url).await?
+        };
 
         // 3. Background name resolution: update if discovered from headers.
         if let Some(new_name) = &filename_opt {
@@ -355,6 +377,12 @@ impl Downloader {
         }
 
         if !supports_range || total_size == 0 {
+            if self.config.force_multi {
+                eprintln!(
+                    "[{}] Range not confirmed or size unknown; falling back to single connection to avoid corruption.",
+                    self.config.id
+                );
+            }
             return self.download_single_connection(on_progress).await;
         }
 
@@ -461,7 +489,11 @@ impl Downloader {
         
         let on_progress_arc = Arc::new(on_progress);
         let error_occurred = Arc::new(std::sync::Mutex::new(None));
+        let abort_workers = Arc::new(AtomicBool::new(false));
         let throttled = Arc::new(std::sync::Mutex::new(false));
+        let failure_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let range_diag_logged = Arc::new(AtomicBool::new(false));
+        let multi_start = std::time::Instant::now();
 
         // State for direct access
         let pending_chunks = Arc::new(std::sync::Mutex::new(chunks.into_iter().filter(|c| c.downloaded < (c.end - c.start + 1)).collect::<Vec<_>>()));
@@ -489,7 +521,54 @@ impl Downloader {
         loop {
             // Check for errors from workers
             if let Some(err) = error_occurred.lock().unwrap().clone() {
+                if matches!(err, DownloadError::NoRangeSupport) && self.config.force_multi {
+                    abort_workers.store(true, Ordering::Relaxed);
+                    if let Some(ref db) = self.db_path {
+                        crate::db::delete_download_chunks(db, &self.config.id).ok();
+                    }
+                    let _ = std::fs::remove_file(&self.config.filepath);
+                    self.downloaded_atomic.store(0, Ordering::SeqCst);
+                    {
+                        let mut p = self.progress.lock().unwrap();
+                        p.downloaded = 0;
+                        p.connections = 1;
+                        p.status_text = Some("Server rejected multi-connection. Switching to single...".to_string());
+                        p.status_phase = Some("fallback_single".to_string());
+                        p.phase_elapsed_secs = Some(0);
+                    }
+                    let on_progress_fallback = on_progress_arc.clone();
+                    (on_progress_fallback)(self.progress.lock().unwrap().clone());
+                    return self
+                        .download_single_connection(move |p| (on_progress_fallback)(p))
+                        .await;
+                }
                 return Err(err);
+            }
+
+            if self.config.force_multi {
+                let failures = failure_count.load(Ordering::Relaxed);
+                let downloaded = self.downloaded_atomic.load(Ordering::Relaxed);
+                if downloaded == 0 && failures >= max_workers as usize && multi_start.elapsed().as_secs() >= 3 {
+                    abort_workers.store(true, Ordering::Relaxed);
+                    if let Some(ref db) = self.db_path {
+                        crate::db::delete_download_chunks(db, &self.config.id).ok();
+                    }
+                    let _ = std::fs::remove_file(&self.config.filepath);
+                    self.downloaded_atomic.store(0, Ordering::SeqCst);
+                    {
+                        let mut p = self.progress.lock().unwrap();
+                        p.downloaded = 0;
+                        p.connections = 1;
+                        p.status_text = Some("Multi-connection failed. Switching to single...".to_string());
+                        p.status_phase = Some("fallback_single".to_string());
+                        p.phase_elapsed_secs = Some(0);
+                    }
+                    let on_progress_fallback = on_progress_arc.clone();
+                    (on_progress_fallback)(self.progress.lock().unwrap().clone());
+                    return self
+                        .download_single_connection(move |p| (on_progress_fallback)(p))
+                        .await;
+                }
             }
 
             // Spawn workers up to current target
@@ -515,6 +594,9 @@ impl Downloader {
                 let error_ptr = error_occurred.clone();
                 let throttled_ptr = throttled.clone();
                 let cancel_signal = self.cancel_signal.clone();
+                let abort_signal = abort_workers.clone();
+                let failure_counter = failure_count.clone();
+                let range_diag_logged = range_diag_logged.clone();
                 let last_emit_clone = self.last_emit.clone();
                 let speed_state_clone = speed_state.clone();
                 let rate_limiter = self.rate_limiter.clone();
@@ -532,6 +614,9 @@ impl Downloader {
                     let mut final_error = None;
                     
                     'worker_mission: loop {
+                        if abort_signal.load(Ordering::Relaxed) {
+                            break 'worker_mission;
+                        }
                         if let Some(sig) = &cancel_signal {
                             if sig.load(Ordering::Relaxed) { 
                                 break; 
@@ -555,6 +640,7 @@ impl Downloader {
                                 tokio::select! {
                                     _ = &mut sleep => break,
                                     _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                                        if abort_signal.load(Ordering::Relaxed) { break 'worker_mission; }
                                         if let Some(sig) = &cancel_signal {
                                             if sig.load(Ordering::Relaxed) { break 'worker_mission; }
                                         }
@@ -570,19 +656,67 @@ impl Downloader {
                             chunk_file.seek(tokio::io::SeekFrom::Start(current_start)).await?;
 
                             let range = format!("bytes={}-{}", current_start, chunk.end);
-                            let response = client.get(url.clone()).header("Range", range).send().await?;
+                            let response = client
+                                .get(url.clone())
+                                .header(reqwest::header::RANGE, range.clone())
+                                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                                .send()
+                                .await?;
 
                             if response.status() == 429 || response.status() == 503 {
                                 *throttled_ptr.lock().unwrap() = true;
                                 return Err(DownloadError::Network("Server throttling".to_string()));
                             }
 
-                            if !response.status().is_success() {
-                                return Err(DownloadError::Network(format!("HTTP {}", response.status())));
+                            let status = response.status();
+                            let headers = response.headers();
+                            let has_content_range = headers
+                                .contains_key(reqwest::header::CONTENT_RANGE);
+                            if !status.is_success() {
+                                if matches!(
+                                    status,
+                                    reqwest::StatusCode::FORBIDDEN
+                                        | reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+                                        | reqwest::StatusCode::METHOD_NOT_ALLOWED
+                                ) {
+                                    return Err(DownloadError::NoRangeSupport);
+                                }
+                                return Err(DownloadError::Network(format!("HTTP {}", status)));
+                            }
+                            if status != reqwest::StatusCode::PARTIAL_CONTENT && !has_content_range {
+                                if !range_diag_logged.swap(true, Ordering::Relaxed) {
+                                    let content_range = headers
+                                        .get(reqwest::header::CONTENT_RANGE)
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("-");
+                                    let accept_ranges = headers
+                                        .get("accept-ranges")
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("-");
+                                    let content_length = headers
+                                        .get(reqwest::header::CONTENT_LENGTH)
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("-");
+                                    let content_type = headers
+                                        .get(reqwest::header::CONTENT_TYPE)
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("-");
+                                    eprintln!(
+                                        "[{}] Range rejected: status={} range='{}' content-range='{}' accept-ranges='{}' content-length='{}' content-type='{}'",
+                                        id_clone,
+                                        status,
+                                        range,
+                                        content_range,
+                                        accept_ranges,
+                                        content_length,
+                                        content_type
+                                    );
+                                }
+                                return Err(DownloadError::NoRangeSupport);
                             }
 
                             // Capture content-type for detailed error reporting if decoding fails
-                            let content_type = response.headers()
+                            let content_type = headers
                                 .get(reqwest::header::CONTENT_TYPE)
                                 .and_then(|v| v.to_str().ok())
                                 .unwrap_or("")
@@ -597,6 +731,7 @@ impl Downloader {
                             let mut last_db_update = std::time::Instant::now();
 
                             while let Ok(item_opt) = tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await {
+                                if abort_signal.load(Ordering::Relaxed) { break; }
                                 if let Some(sig) = &cancel_signal {
                                     if sig.load(Ordering::Relaxed) { break; }
                                 }
@@ -665,6 +800,13 @@ impl Downloader {
                         match res {
                             Ok(_) => { break; }
                             Err(e) => {
+                                eprintln!("[{}] Worker error on chunk {}-{}: {}", id_clone, chunk.start, chunk.end, e);
+                                failure_counter.fetch_add(1, Ordering::Relaxed);
+                                if matches!(e, DownloadError::NoRangeSupport) {
+                                    abort_signal.store(true, Ordering::Relaxed);
+                                    final_error = Some(e);
+                                    break;
+                                }
                                 if let Some(sig) = &cancel_signal {
                                     if sig.load(Ordering::Relaxed) { break; }
                                 }
@@ -818,30 +960,58 @@ impl Downloader {
 
 /// Queries a URL using a `HEAD` request to verify if it supports segmented downloads. 
 /// Also extracts the content length and suggested filename.
-pub async fn check_range_support(client: &Client, url: &str) -> Result<(bool, u64, Option<String>), DownloadError> {
-    let response = client.head(url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send().await.map_err(|e| DownloadError::Network(e.to_string()))?;
+pub async fn check_range_support(
+    client: &Client,
+    url: &str,
+) -> Result<(bool, u64, Option<String>), DownloadError> {
+    let mut filename_opt: Option<String> = None;
 
-    let filename = extract_filename(url, response.headers());
-    let filename_opt = if filename != "download" && filename != "download_file" && filename != "uc" {
-        Some(filename)
+    let range_response = client
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+        .map_err(|e| DownloadError::Network(e.to_string()))?;
+
+    if range_response.status().is_client_error() || range_response.status().is_server_error() {
+        return Err(DownloadError::Network(format!(
+            "HTTP {}",
+            range_response.status()
+        )));
+    }
+
+    let filename = extract_filename(url, range_response.headers());
+    if filename != "download" && filename != "download_file" && filename != "uc" {
+        filename_opt = Some(filename);
+    }
+
+    let content_range = range_response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split('/').last())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let (supports_range, total_size) = if let Some(total) = content_range {
+        (true, total)
     } else {
-        None
+        let accept_ranges = range_response
+            .headers()
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == "bytes")
+            .unwrap_or(false);
+        let supports_range = accept_ranges || range_response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let total_size = range_response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|val| val.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        (supports_range, total_size)
     };
-
-    let supports_range = response
-        .headers()
-        .get("accept-ranges")
-        .map(|v| v.to_str().unwrap_or("") == "bytes")
-        .unwrap_or(false) || response.headers().contains_key("content-range");
-
-    let total_size = response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|val| val.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
 
     Ok((supports_range, total_size, filename_opt))
 }

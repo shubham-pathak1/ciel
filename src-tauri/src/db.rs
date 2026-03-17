@@ -232,7 +232,9 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('retry_delay', '5'),
             ('cookie_browser', 'none'),
             ('ask_location', 'false'),
-            ('auto_organize', 'false');
+            ('auto_organize', 'false'),
+            ('torrent_debug_stats', 'false'),
+            ('force_multi_http', 'false');
         "
     )?;
 
@@ -542,6 +544,13 @@ pub fn update_chunk_progress<P: AsRef<Path>>(db_path: P, download_id: &str, star
         "UPDATE chunks SET downloaded = ?1 WHERE download_id = ?2 AND start_byte = ?3",
         (downloaded, download_id, start_byte),
     )?;
+    Ok(())
+}
+
+/// Removes all chunk records for a specific download.
+pub fn delete_download_chunks<P: AsRef<Path>>(db_path: P, download_id: &str) -> SqliteResult<()> {
+    let conn = open_db(db_path)?;
+    conn.execute("DELETE FROM chunks WHERE download_id = ?1", [download_id])?;
     Ok(())
 }
 
