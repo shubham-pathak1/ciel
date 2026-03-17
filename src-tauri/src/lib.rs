@@ -20,8 +20,18 @@ mod scheduler;
 pub mod clipboard;
 pub mod tray;
 
-use tauri::Manager;
 use tauri::Listener;
+use tauri::Manager;
+
+pub(crate) struct CrashMarkerState {
+    path: std::path::PathBuf,
+}
+
+impl CrashMarkerState {
+    fn clear(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 /// The primary entry point to initialize and launch the Ciel application.
 /// 
@@ -32,9 +42,11 @@ use tauri::Listener;
 /// 4. Registers all IPC commands accessible from the frontend.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Window may have been destroyed to save RAM, so we recreate if needed
             tray::show_or_create_window(app);
@@ -49,6 +61,19 @@ pub fn run() {
             let torrent_session_dir = app_data_path.join("torrents");
 
             // 2. Immediate State Management (Zero I/O)
+            let crash_marker_path = app_data_path.join("unclean_shutdown.flag");
+            let had_unclean = crash_marker_path.exists();
+            let _ = std::fs::create_dir_all(&app_data_path);
+            let _ = std::fs::write(&crash_marker_path, b"1");
+            app.manage(CrashMarkerState {
+                path: crash_marker_path,
+            });
+            println!(
+                "[Startup] crash_marker_present={}, fastresume={}",
+                had_unclean,
+                !had_unclean
+            );
+
             app.manage(db::DbState {
                 path: db_path.to_string_lossy().to_string(),
             });
@@ -56,7 +81,9 @@ pub fn run() {
             
             // Start TorrentManager with "Optimistic" defaults.
             // It will warm up its engine in its own background task.
-            let torrent_manager = torrent::TorrentManager::new(torrent_session_dir, false);
+            let fastresume_enabled = !had_unclean;
+            let torrent_manager =
+                torrent::TorrentManager::new(torrent_session_dir, false, fastresume_enabled);
             app.manage(torrent_manager);
 
             // 3. WINDOW DECORATION (Sync - Cheap Win32 calls)
@@ -121,6 +148,7 @@ pub fn run() {
             commands::http::add_download,
             commands::torrent::add_torrent,
             commands::torrent::analyze_torrent,
+            commands::torrent::run_torrent_diagnostics,
             commands::http::validate_url_type,
             commands::torrent::start_selective_torrent,
             commands::pause_download,
@@ -134,6 +162,8 @@ pub fn run() {
             commands::clear_finished,
             clipboard::get_clipboard,
         ])
-        .run(tauri::generate_context!())
+        .build(context)
         .expect("error while running tauri application");
+
+    app.run(|_, _| {});
 }

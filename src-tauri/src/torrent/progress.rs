@@ -136,6 +136,8 @@ impl TorrentManager {
             let mut live_stalled_since: Option<std::time::Instant> = None;
             let mut last_recovery_poke: Option<std::time::Instant> = None;
             let mut last_progress_seen = handle.stats().progress_bytes;
+            let mut last_db_flush = std::time::Instant::now();
+            let mut last_db_bytes = handle.stats().progress_bytes;
             let mut phase_key = if is_resume {
                 "restoring_session".to_string()
             } else {
@@ -296,8 +298,8 @@ impl TorrentManager {
                 // NOTE: We do NOT update filename/filepath here - they are already set correctly
                 // by commands.rs with unique paths like "Movie (1).mkv"
                 if !name_updated && stats.total_bytes > 0 {
-                    let name_result = handle.with_metadata(|m| m.name.clone());
-                    if let Ok(_real_name) = name_result {
+                    let meta_result = handle.with_metadata(|m| (m.name.clone(), m.file_infos.len()));
+                    if let Ok((_real_name, file_count)) = meta_result {
                         let total_size = stats.total_bytes;
 
                         // Update DB size
@@ -312,6 +314,15 @@ impl TorrentManager {
                         let id_p = id_clone.clone();
                         let info_hash_hex = hex::encode(handle.info_hash().0);
 
+                        println!(
+                            "[Torrent][Meta][{}] total_bytes={} files={} selected_files={} info_hash={}",
+                            id_clone,
+                            total_size,
+                            file_count,
+                            selected_indices_for_cleanup.as_ref().map(|v| v.len()).unwrap_or(0),
+                            info_hash_hex
+                        );
+
                         tokio::task::spawn_blocking(move || {
                             if let Ok(conn) = crate::db::open_db(db_p) {
                                 let _ = conn.execute(
@@ -325,19 +336,32 @@ impl TorrentManager {
                     }
                 }
 
-                // Persist progress to DB
-                let _ = crate::db::update_download_progress(
-                    &db_path_clone,
-                    &id_clone,
-                    stats.progress_bytes as i64,
-                    speed_u64 as i64,
-                );
-
                 if !stats.finished {
                     let is_cached_paused = {
                         let paused = paused_downloads.lock().await;
                         paused.contains(&id_clone)
                     };
+                    let is_verifying = stats.live.is_none()
+                        && startup_first_byte_at.is_none()
+                        && stats.progress_bytes > startup_baseline_bytes;
+                    let bytes_delta = stats.progress_bytes.saturating_sub(last_db_bytes);
+                    let should_flush_db = !is_verifying
+                        && (stats.total_bytes > 0 && stats.progress_bytes >= stats.total_bytes
+                            || bytes_delta >= 1_048_576
+                            || last_db_flush.elapsed() >= std::time::Duration::from_secs(1)
+                            || is_cached_paused);
+
+                    if should_flush_db {
+                        let _ = crate::db::update_download_progress(
+                            &db_path_clone,
+                            &id_clone,
+                            stats.progress_bytes as i64,
+                            speed_u64 as i64,
+                        );
+                        last_db_flush = now;
+                        last_db_bytes = stats.progress_bytes;
+                    }
+
                     if !is_cached_paused
                         && !startup_timeout_logged
                         && startup_first_byte_at.is_none()
@@ -524,7 +548,7 @@ impl TorrentManager {
                             } else if startup_first_byte_at.is_none() {
                                 (
                                     Some(format!(
-                                        "Receiving chunks... waiting for verification ({} peers)",
+                                        "Receiving data (unverified, {} peers)",
                                         connections
                                     )),
                                     "preparing_first_piece",
@@ -534,19 +558,17 @@ impl TorrentManager {
                             }
                         };
                     if phase_key != phase_next {
-                        if startup_elapsed <= std::time::Duration::from_secs(30) {
-                            println!(
-                                "[Torrent][Phase][{}] {} -> {} at {}ms peers={} speed={}Bps rx={} verified={}",
-                                id_clone,
-                                phase_key,
-                                phase_next,
-                                startup_elapsed.as_millis(),
-                                connections,
-                                speed_u64,
-                                network_received,
-                                stats.progress_bytes
-                            );
-                        }
+                        println!(
+                            "[Torrent][Phase][{}] {} -> {} at {}ms peers={} speed={}Bps rx={} verified={}",
+                            id_clone,
+                            phase_key,
+                            phase_next,
+                            startup_elapsed.as_millis(),
+                            connections,
+                            speed_u64,
+                            network_received,
+                            stats.progress_bytes
+                        );
                         phase_key = phase_next.to_string();
                         phase_started_at = now;
                     }
@@ -570,8 +592,12 @@ impl TorrentManager {
                     );
                 }
 
-                if (stats.finished
-                    || (stats.total_bytes > 0 && stats.progress_bytes >= stats.total_bytes))
+                let complete_by_stats = stats.finished;
+                let complete_by_bytes = stats.live.is_some()
+                    && stats.total_bytes > 0
+                    && stats.progress_bytes >= stats.total_bytes;
+
+                if (complete_by_stats || complete_by_bytes)
                     && !completion_handled
                 {
                     let file_entries_for_cleanup = if selected_indices_for_cleanup.is_some() {

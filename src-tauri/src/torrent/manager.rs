@@ -20,6 +20,15 @@ pub struct TorrentManager {
     pub(super) paused_downloads: Arc<Mutex<HashSet<String>>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TorrentStatsSnapshot {
+    pub progress_bytes: u64,
+    pub total_bytes: u64,
+    pub fetched_bytes: u64,
+    pub live_peers: u64,
+    pub is_live: bool,
+}
+
 impl TorrentManager {
     pub(super) fn extract_initial_peers_from_magnet(
         magnet: &str,
@@ -45,7 +54,11 @@ impl TorrentManager {
     }
 
     /// Creates a new `TorrentManager` and spawns a background task to initialize the `librqbit` session.
-    pub fn new(session_dir: std::path::PathBuf, _force_encryption: bool) -> Self {
+    pub fn new(
+        session_dir: std::path::PathBuf,
+        _force_encryption: bool,
+        fastresume_enabled: bool,
+    ) -> Self {
         let session = Arc::new(Mutex::new(None));
         let session_clone = session.clone();
         let session_dir_clone = session_dir.clone();
@@ -62,7 +75,7 @@ impl TorrentManager {
                 disable_dht_persistence: false,
                 // Persist session and bitfield state to enable fast resume across restarts.
                 // Without fastresume, restored torrents can still trigger long local verification.
-                fastresume: true,
+                fastresume: fastresume_enabled,
                 persistence: Some(librqbit::SessionPersistenceConfig::Json {
                     folder: Some(session_dir_clone.clone()),
                 }),
@@ -99,6 +112,30 @@ impl TorrentManager {
         // Speed calculation for torrents is complex to aggregate here without a cache.
         // We'll return 0 for now to fix the build, and I'll add real tracking in a follow-up.
         (count, 0)
+    }
+
+    pub async fn get_stats_snapshot(&self, id: &str) -> Option<TorrentStatsSnapshot> {
+        let active = self.active_torrents.lock().await;
+        let handle = active.get(id)?.clone();
+        drop(active);
+
+        let stats = handle.stats();
+        let (fetched_bytes, live_peers, is_live) = match stats.live.as_ref() {
+            Some(live) => (
+                live.snapshot.fetched_bytes,
+                live.snapshot.peer_stats.live as u64,
+                true,
+            ),
+            None => (0, 0, false),
+        };
+
+        Some(TorrentStatsSnapshot {
+            progress_bytes: stats.progress_bytes,
+            total_bytes: stats.total_bytes,
+            fetched_bytes,
+            live_peers,
+            is_live,
+        })
     }
 
     /// Waits until the session is initialized, up to `timeout_ms`.
@@ -334,6 +371,32 @@ impl TorrentManager {
     /// Checks if a torrent with the given ID is currently active in the manager.
     pub async fn is_active(&self, id: &str) -> bool {
         self.active_torrents.lock().await.contains_key(id)
+    }
+
+    /// Attempts to adopt a torrent already present in the underlying session by its info hash.
+    /// Returns true if it was found and added to the manager's active map.
+    pub async fn adopt_from_session(&self, id: &str, info_hash_hex: &str) -> Result<bool, String> {
+        let session_guard = self.session.lock().await;
+        let session = session_guard.as_ref().ok_or("Torrent session is not active")?;
+
+        let target_hash = info_hash_hex.to_lowercase();
+        let existing = session.with_torrents(|iter| {
+            for (_id, handle) in iter {
+                let h_hex = hex::encode(handle.info_hash().0);
+                if h_hex.eq_ignore_ascii_case(&target_hash) {
+                    return Some(handle.clone());
+                }
+            }
+            None
+        });
+
+        if let Some(handle) = existing {
+            let mut active = self.active_torrents.lock().await;
+            active.insert(id.to_string(), handle);
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     /// Forcefully removes a torrent from the session by its info hash.

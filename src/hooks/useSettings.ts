@@ -19,6 +19,8 @@ export interface SettingsState {
     scheduler_pause_time: string;
     auto_organize: boolean;
     cookie_browser: string;
+    torrent_debug_stats: boolean;
+    force_multi_http: boolean;
 }
 
 const DEFAULT_SETTINGS: SettingsState = {
@@ -39,6 +41,8 @@ const DEFAULT_SETTINGS: SettingsState = {
     scheduler_pause_time: "08:00",
     auto_organize: false,
     cookie_browser: "none",
+    torrent_debug_stats: false,
+    force_multi_http: false,
 };
 
 // Simple global observers to sync multiple hook instances
@@ -69,6 +73,8 @@ export function useSettings() {
                 scheduler_pause_time: result.scheduler_pause_time || DEFAULT_SETTINGS.scheduler_pause_time,
                 auto_organize: result.auto_organize === "true",
                 cookie_browser: result.cookie_browser || DEFAULT_SETTINGS.cookie_browser,
+                torrent_debug_stats: result.torrent_debug_stats === "true",
+                force_multi_http: result.force_multi_http === "true",
             };
             setSettings(newSettings);
             observers.forEach(obs => obs(newSettings));

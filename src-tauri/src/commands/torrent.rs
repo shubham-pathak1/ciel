@@ -1,5 +1,5 @@
 use crate::db::{self, DbState, Download, DownloadProtocol, DownloadStatus};
-use crate::torrent::TorrentManager;
+use crate::torrent::{TorrentManager, TorrentStatsSnapshot};
 use super::{DownloadManager, ensure_unique_path, resolve_download_path, set_and_emit_download_error};
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Runtime, State};
@@ -160,6 +160,18 @@ pub async fn add_torrent<R: Runtime>(
             .to_string()
     };
 
+    println!(
+        "[Torrent][Add][{}] queued={} start_paused={} indices={} output_folder={} size_hint={} analysis_id_present={} is_magnet={}",
+        id,
+        should_queue,
+        start_paused.unwrap_or(false),
+        indices.as_ref().map(|v| v.len()).unwrap_or(0),
+        base_folder,
+        total_size.unwrap_or(0),
+        analysis_id.is_some(),
+        is_magnet
+    );
+
     let source_torrent_bytes = if !should_queue {
         if let Some(analysis_id) = analysis_id.as_ref() {
             torrent_manager.consume_analysis_bytes(analysis_id).await
@@ -233,4 +245,210 @@ pub async fn start_selective_torrent(
     indices: Vec<usize>,
 ) -> Result<(), String> {
     torrent_manager.start_selective(&id, indices).await
+}
+
+fn format_snapshot(snapshot: &TorrentStatsSnapshot) -> String {
+    format!(
+        "progress={} total={} fetched={} peers={} live={}",
+        snapshot.progress_bytes,
+        snapshot.total_bytes,
+        snapshot.fetched_bytes,
+        snapshot.live_peers,
+        snapshot.is_live
+    )
+}
+
+async fn wait_for_diagnostic<R: Runtime>(
+    app: &AppHandle<R>,
+    torrent_manager: &TorrentManager,
+    id: &str,
+    baseline: &TorrentStatsSnapshot,
+    timeout: std::time::Duration,
+) -> (Option<std::time::Duration>, Option<std::time::Duration>, Option<std::time::Duration>) {
+    let start = std::time::Instant::now();
+    let mut live_at = None;
+    let mut first_network_at = None;
+    let mut first_progress_at = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            break;
+        }
+
+        if let Some(snapshot) = torrent_manager.get_stats_snapshot(id).await {
+            if live_at.is_none() && snapshot.is_live {
+                live_at = Some(start.elapsed());
+                println!(
+                    "[Diag][Torrent][{}] live_at_ms={} {}",
+                    id,
+                    start.elapsed().as_millis(),
+                    format_snapshot(&snapshot)
+                );
+            }
+            if first_network_at.is_none() && snapshot.fetched_bytes > baseline.fetched_bytes {
+                first_network_at = Some(start.elapsed());
+                println!(
+                    "[Diag][Torrent][{}] first_network_at_ms={} {}",
+                    id,
+                    start.elapsed().as_millis(),
+                    format_snapshot(&snapshot)
+                );
+            }
+            if first_progress_at.is_none() && snapshot.progress_bytes > baseline.progress_bytes {
+                first_progress_at = Some(start.elapsed());
+                println!(
+                    "[Diag][Torrent][{}] first_progress_at_ms={} {}",
+                    id,
+                    start.elapsed().as_millis(),
+                    format_snapshot(&snapshot)
+                );
+            }
+            if live_at.is_some() && first_network_at.is_some() && first_progress_at.is_some() {
+                break;
+            }
+        }
+
+        let _ = app.emit(
+            "diagnostic-ping",
+            serde_json::json!({ "id": id, "elapsed_ms": start.elapsed().as_millis() }),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    (live_at, first_network_at, first_progress_at)
+}
+
+/// Automated torrent diagnostics to reduce manual testing.
+#[tauri::command]
+pub async fn run_torrent_diagnostics<R: Runtime>(
+    app: AppHandle<R>,
+    db_state: State<'_, DbState>,
+    torrent_manager: State<'_, TorrentManager>,
+    url: String,
+    output_folder: Option<String>,
+    indices: Option<Vec<usize>>,
+    timeout_secs: Option<u64>,
+) -> Result<String, String> {
+    let is_magnet = url.starts_with("magnet:");
+    let mut filename = "diagnostic.torrent".to_string();
+
+    if is_magnet {
+        if let Ok(parsed_url) = url::Url::parse(&url) {
+            if let Some((_, name)) = parsed_url.query_pairs().find(|(k, _)| k == "dn") {
+                filename = name.to_string();
+            }
+        }
+    } else if let Some(name) = Path::new(&url).file_name() {
+        filename = name.to_string_lossy().to_string();
+    }
+
+    let resolved_path = resolve_download_path(&app, &db_state.path, &filename, output_folder.clone());
+    let final_resolved_path = ensure_unique_path(&db_state.path, resolved_path.clone());
+    let final_filename = Path::new(&final_resolved_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| filename.clone());
+
+    let base_folder = if let Some(folder) = output_folder {
+        folder
+    } else {
+        Path::new(&final_resolved_path)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_string_lossy()
+            .to_string()
+    };
+
+    let id = format!("diag-{}", uuid::Uuid::new_v4());
+    let download = Download {
+        id: id.clone(),
+        url: url.clone(),
+        filename: final_filename,
+        filepath: final_resolved_path.clone(),
+        size: 0,
+        downloaded: 0,
+        status: DownloadStatus::Downloading,
+        protocol: DownloadProtocol::Torrent,
+        speed: 0,
+        connections: 0,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        completed_at: None,
+        error_message: None,
+        info_hash: None,
+        metadata: serialize_torrent_indices_metadata(&indices),
+        user_agent: None,
+        cookies: None,
+        category: "Diagnostics".to_string(),
+    };
+
+    db::insert_download(&db_state.path, &download).map_err(|e| e.to_string())?;
+    db::log_event(&db_state.path, &download.id, "diagnostic_start", None).ok();
+
+    println!(
+        "[Diag][Torrent][{}] start url_len={} output_folder={} indices={}",
+        id,
+        url.len(),
+        base_folder,
+        indices.as_ref().map(|v| v.len()).unwrap_or(0)
+    );
+
+    if !torrent_manager.wait_until_ready(30000).await {
+        let msg = "Torrent engine is still initializing. Please retry in a few seconds.".to_string();
+        set_and_emit_download_error(&app, &db_state.path, &id, &msg);
+        return Err(msg);
+    }
+
+    torrent_manager
+        .add_magnet(
+            app.clone(),
+            id.clone(),
+            url,
+            base_folder,
+            db_state.path.clone(),
+            indices,
+            0,
+            false,
+            false,
+            None,
+        )
+        .await?;
+
+    let baseline = torrent_manager
+        .get_stats_snapshot(&id)
+        .await
+        .unwrap_or(TorrentStatsSnapshot {
+            progress_bytes: 0,
+            total_bytes: 0,
+            fetched_bytes: 0,
+            live_peers: 0,
+            is_live: false,
+        });
+
+    println!(
+        "[Diag][Torrent][{}] baseline {}",
+        id,
+        format_snapshot(&baseline)
+    );
+
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(90));
+    let (live_at, first_network_at, first_progress_at) =
+        wait_for_diagnostic(&app, &torrent_manager, &id, &baseline, timeout).await;
+
+    println!(
+        "[Diag][Torrent][{}] summary live_ms={:?} first_network_ms={:?} first_progress_ms={:?}",
+        id,
+        live_at.map(|d| d.as_millis()),
+        first_network_at.map(|d| d.as_millis()),
+        first_progress_at.map(|d| d.as_millis())
+    );
+
+    let _ = torrent_manager.pause_torrent(&id).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let _ = torrent_manager.resume_torrent(&id).await;
+    println!("[Diag][Torrent][{}] pause_resume_complete", id);
+
+    Ok(format!(
+        "Diagnostics running for {}. Check terminal logs with [Diag][Torrent].",
+        id
+    ))
 }

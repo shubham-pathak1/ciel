@@ -9,7 +9,7 @@ use tauri::{
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder,
 };
-use crate::scheduler;
+use crate::{scheduler, CrashMarkerState};
 
 /// Helper function to show or recreate the main window.
 /// If the window was destroyed to save RAM, this recreates it.
@@ -105,7 +105,11 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .on_menu_event(move |app, event| {
             let app_handle = app.clone();
             match event.id.as_ref() {
-                "quit" => app.exit(0),
+                "quit" => {
+                    let marker = app.state::<CrashMarkerState>();
+                    marker.clear();
+                    app.exit(0)
+                }
                 "show" => {
                     show_or_create_window(app);
                 }

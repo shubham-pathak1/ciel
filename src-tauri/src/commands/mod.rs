@@ -2,7 +2,7 @@ pub mod http;
 pub mod torrent;
 
 pub use http::{add_download, validate_url_type, DownloadManager, UrlTypeInfo};
-pub use torrent::{add_torrent, analyze_torrent, start_selective_torrent};
+pub use torrent::{add_torrent, analyze_torrent, run_torrent_diagnostics, start_selective_torrent};
 
 use crate::db::{self, DbState, Download, DownloadProtocol, DownloadStatus};
 use crate::torrent::TorrentManager;
@@ -327,12 +327,50 @@ pub async fn resume_download<R: Runtime>(
 
     match download.protocol {
         DownloadProtocol::Torrent => {
+            let resume_watch_id = id.clone();
+            let resume_watch_app = app.clone();
+            let resume_watch_manager = torrent_manager.inner().clone();
+            let resume_watch_baseline = download.downloaded.max(0) as u64;
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                if let Some(snapshot) = resume_watch_manager
+                    .get_stats_snapshot(&resume_watch_id)
+                    .await
+                {
+                    if !snapshot.is_live
+                        && snapshot.live_peers == 0
+                        && snapshot.progress_bytes <= resume_watch_baseline
+                    {
+                        println!(
+                            "[Torrent][Resume][{}] watchdog_stuck progress={} peers={} live={}",
+                            resume_watch_id,
+                            snapshot.progress_bytes,
+                            snapshot.live_peers,
+                            snapshot.is_live
+                        );
+                        let _ = resume_watch_app.emit(
+                            "download-progress",
+                            serde_json::json!({
+                                "id": resume_watch_id,
+                                "status_text": "Restoring session... (retrying)",
+                                "status_phase": "restoring_session",
+                                "phase_elapsed_secs": 20u64,
+                            }),
+                        );
+                        let _ = resume_watch_manager.resume_torrent(&resume_watch_id).await;
+                    }
+                }
+            });
+
             println!(
-                "[Torrent][Resume][{}] requested status_before={} downloaded={} total={}",
+                "[Torrent][Resume][{}] requested status_before={} downloaded={} total={} info_hash={} meta_len={} url_len={}",
                 id,
                 download.status.as_str(),
                 download.downloaded.max(0),
-                download.size.max(0)
+                download.size.max(0),
+                download.info_hash.clone().unwrap_or_default(),
+                download.metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+                download.url.len()
             );
             let _ = app.emit("download-progress", serde_json::json!({
                 "id": id,

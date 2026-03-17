@@ -147,6 +147,7 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
     const [sortBy, setSortBy] = useState<"date" | "name" | "size" | "progress">("date");
     const hasAutoResumed = useRef(false);
     const hasStartupReconciled = useRef(false);
+    const { settings } = useSettings();
 
     /**
      * Refreshes the download list and handles the "Auto-Resume" feature.
@@ -408,6 +409,7 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
                                 download={download}
                                 onRefresh={handleRefreshList}
                                 setDownloads={setDownloads}
+                                showTorrentDebug={settings.torrent_debug_stats}
                             />
                         ))}
                     </AnimatePresence>
@@ -455,29 +457,35 @@ function EmptyState({ filter, onAdd }: { filter: string, onAdd: () => void }) {
 const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
     download: DownloadItem,
     onRefresh: () => void,
-    setDownloads: React.Dispatch<React.SetStateAction<DownloadItem[]>>
+    setDownloads: React.Dispatch<React.SetStateAction<DownloadItem[]>>,
+    showTorrentDebug: boolean,
 }>(
-    ({ download, onRefresh, setDownloads }, ref) => {
-        const progress = download.size > 0 ? (download.downloaded / download.size) * 100 : 0;
-        const [visualProgress, setVisualProgress] = useState(progress);
+    ({ download, onRefresh, setDownloads, showTorrentDebug }, ref) => {
+        const totalBytes = Math.max(download.size, 0);
+        const verifiedBytes = Math.max(download.downloaded, 0);
+        const [visualProgress, setVisualProgress] = useState(0);
         const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
         const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
         const [deleteFiles, setDeleteFiles] = useState(download.status !== 'completed');
         const [isDeleting, setIsDeleting] = useState(false);
         const statusText = download.status_text ?? "";
         const statusPhase = download.status_phase ?? "";
+        const networkReceived = Math.max(download.network_received ?? verifiedBytes, verifiedBytes);
         const isPreparingFirstPiece =
             statusPhase === "preparing_first_piece" ||
             statusText.toLowerCase().includes("preparing first piece");
+        const hasNetworkAheadOfVerified = networkReceived > verifiedBytes + 256 * 1024;
+        const shouldUseNetworkProgress =
+            download.protocol === "torrent" && (isPreparingFirstPiece || hasNetworkAheadOfVerified);
+        const displayDownloaded = shouldUseNetworkProgress ? networkReceived : verifiedBytes;
+        const progress = totalBytes > 0 ? Math.min((displayDownloaded / totalBytes) * 100, 100) : 0;
         const isIndeterminateStatus =
             statusText === "Initializing..." ||
             statusText === "Fetching Metadata..." ||
             statusText.includes("Restoring") ||
-            statusText.includes("Verifying") ||
             statusText.includes("Finding peers") ||
             statusText.includes("Connecting") ||
-            statusText.includes("Negotiating") ||
-            isPreparingFirstPiece;
+            statusText.includes("Negotiating");
         const shouldRenderStatusLine =
             statusText.includes("Initializing") ||
             statusText.includes("Metadata") ||
@@ -491,11 +499,11 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
             statusText.includes("Connecting") ||
             statusText.includes("Oops") ||
             isPreparingFirstPiece;
-        const networkReceived = Math.max(download.network_received ?? download.downloaded, download.downloaded);
-        const hasNetworkAheadOfVerified = networkReceived > download.downloaded + 256 * 1024;
         const verifiedSpeed = download.verified_speed ?? download.speed;
         const shouldShowDualSpeed =
-            download.protocol === "torrent" && (isPreparingFirstPiece || hasNetworkAheadOfVerified);
+            showTorrentDebug &&
+            download.protocol === "torrent" &&
+            (isPreparingFirstPiece || hasNetworkAheadOfVerified);
 
         useEffect(() => {
             setVisualProgress(progress);
@@ -645,11 +653,13 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                     "h-full rounded-full transition-all duration-500",
                                     download.status === 'completed' ? 'bg-status-success' :
                                         download.status === 'error' ? 'bg-status-error' :
-                                            (isPreparingFirstPiece || (isIndeterminateStatus && download.size === 0))
+                                            (isIndeterminateStatus && totalBytes === 0)
                                                 ? 'bg-brand-primary animate-progress-indeterminate bg-[length:1rem_1rem] bg-gradient-to-r from-brand-primary via-brand-secondary to-brand-primary'
-                                                : 'bg-text-primary'
+                                                : shouldUseNetworkProgress
+                                                    ? 'bg-accent/80'
+                                                    : 'bg-text-primary'
                                 )}
-                                style={{ width: `${isPreparingFirstPiece || (isIndeterminateStatus && download.size === 0) ? 100 : visualProgress}%` }}
+                                style={{ width: `${isIndeterminateStatus && totalBytes === 0 ? 100 : visualProgress}%` }}
                                 transition={{ type: "spring", stiffness: 400, damping: 40 }}
                             />
                         </div>
@@ -681,7 +691,7 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                                 {getPhaseHint(download.status_phase)}
                                             </span>
                                         )}
-                                        {(isPreparingFirstPiece || hasNetworkAheadOfVerified) && (
+                                        {showTorrentDebug && (isPreparingFirstPiece || hasNetworkAheadOfVerified) && (
                                             <span className="text-[9px] uppercase tracking-wider text-text-tertiary">
                                                 RX {formatSize(networkReceived)} | Verified {formatSize(download.downloaded)}
                                             </span>
@@ -689,7 +699,10 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                     </div>
                                 ) : (
                                     <span className="font-medium tracking-wide">
-                                        {formatSize(download.downloaded)} <span className="text-text-tertiary font-normal px-1">of</span> {formatSize(download.size)}
+                                        {showTorrentDebug && shouldUseNetworkProgress && (
+                                            <span className="text-[9px] uppercase tracking-wider text-text-tertiary mr-1">RX</span>
+                                        )}
+                                        {formatSize(displayDownloaded)} <span className="text-text-tertiary font-normal px-1">of</span> {formatSize(totalBytes)}
                                     </span>
                                 )}
 
@@ -723,7 +736,10 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                         <span className="font-mono text-[10px] tracking-tight">{formatEta(download.eta)} remaining</span>
                                     </div>
                                 )}
-                                <span className={clsx("font-medium", getStatusColor())}>
+                                <span className={clsx("font-medium flex items-center gap-1", getStatusColor())}>
+                                    {showTorrentDebug && shouldUseNetworkProgress && (
+                                        <span className="text-[9px] uppercase tracking-wider text-text-tertiary">RX</span>
+                                    )}
                                     {download.status === 'completed' ? 'Done' : `${visualProgress.toFixed(1)}%`}
                                 </span>
                             </div>
@@ -907,6 +923,7 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                         outputFolder: output_folder || null,
                         userAgent: userAgent || null,
                         cookies: cookies || null,
+                        size: typeInfo.content_length ?? null,
                         startPaused: paused
                     });
                     onAdded();
@@ -955,6 +972,7 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                         outputFolder: output_folder || null,
                         userAgent: userAgent || null,
                         cookies: cookies || null,
+                        size: typeInfo.content_length ?? null,
                         startPaused: paused
                     });
                 }
@@ -1142,4 +1160,6 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         </>
     );
 }
+
+
 
