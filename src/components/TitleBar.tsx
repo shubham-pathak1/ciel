@@ -16,7 +16,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
  * - Handles native window lifecycle events (minimize, maximize, close) via IPC.
  * - Displays application branding.
  */
-export function TitleBar() {
+export function TitleBar({ isFullscreen }: { isFullscreen: boolean }) {
     const appWindow = getCurrentWindow();
 
     const handleMinimize = async () => {
@@ -58,29 +58,31 @@ export function TitleBar() {
             </div>
 
             {/* Window Controls - Custom Modern Style */}
-            <div className="flex items-center gap-2 no-drag">
-                <button
-                    onClick={handleMinimize}
-                    className="w-8 h-7 flex items-center justify-center rounded hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all duration-200"
-                    aria-label="Minimize"
-                >
-                    <Minus size={14} />
-                </button>
-                <button
-                    onClick={handleMaximize}
-                    className="w-8 h-7 flex items-center justify-center rounded hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all duration-200"
-                    aria-label="Maximize"
-                >
-                    <Square size={12} />
-                </button>
-                <button
-                    onClick={handleClose}
-                    className="w-8 h-7 flex items-center justify-center rounded hover:bg-red-500/10 hover:text-red-500 text-text-secondary transition-all duration-200"
-                    aria-label="Close"
-                >
-                    <X size={14} />
-                </button>
-            </div>
+            {!isFullscreen && (
+                <div className="flex items-center gap-2 no-drag">
+                    <button
+                        onClick={handleMinimize}
+                        className="w-8 h-7 flex items-center justify-center rounded hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all duration-200"
+                        aria-label="Minimize"
+                    >
+                        <Minus size={14} />
+                    </button>
+                    <button
+                        onClick={handleMaximize}
+                        className="w-8 h-7 flex items-center justify-center rounded hover:bg-brand-tertiary text-text-secondary hover:text-text-primary transition-all duration-200"
+                        aria-label="Maximize"
+                    >
+                        <Square size={12} />
+                    </button>
+                    <button
+                        onClick={handleClose}
+                        className="w-8 h-7 flex items-center justify-center rounded hover:bg-red-500/10 hover:text-red-500 text-text-secondary transition-all duration-200"
+                        aria-label="Close"
+                    >
+                        <X size={14} />
+                    </button>
+                </div>
+            )}
         </div>
     );
 }

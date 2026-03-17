@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { DownloadQueue } from "./components/DownloadQueue";
@@ -13,7 +14,51 @@ type View = "downloads" | "active" | "completed" | "settings" | "scheduler" | "V
 
 function App() {
     const [currentView, setCurrentView] = useState<View>("downloads");
+    const [isFullscreen, setIsFullscreen] = useState(false);
     const { settings } = useSettings();
+
+    useEffect(() => {
+        const appWindow = getCurrentWindow();
+        let unlisten: (() => void) | null = null;
+
+        const syncFullscreen = async () => {
+            try {
+                const fullscreen = await appWindow.isFullscreen();
+                setIsFullscreen(fullscreen);
+            } catch (err) {
+                console.error("Fullscreen sync failed:", err);
+            }
+        };
+
+        const handleKeyDown = async (event: KeyboardEvent) => {
+            if (event.key !== "F11") return;
+            event.preventDefault();
+            try {
+                const isFullscreen = await appWindow.isFullscreen();
+                await appWindow.setFullscreen(!isFullscreen);
+                setIsFullscreen(!isFullscreen);
+            } catch (err) {
+                console.error("Fullscreen toggle failed:", err);
+            }
+        };
+
+        syncFullscreen();
+        appWindow.onResized(() => {
+            void syncFullscreen();
+        }).then((u) => {
+            unlisten = u;
+        }).catch((err) => {
+            console.error("Fullscreen listener failed:", err);
+        });
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => {
+            window.removeEventListener("keydown", handleKeyDown);
+            if (unlisten) {
+                unlisten();
+            }
+        };
+    }, []);
 
     useEffect(() => {
         if (currentView === "scheduler" && !settings.scheduler_enabled) {
@@ -43,7 +88,7 @@ function App() {
 
     return (
         <div className="h-screen w-screen flex flex-col bg-brand-primary text-text-primary overflow-hidden font-sans relative selection:bg-zinc-700 selection:text-white">
-            <TitleBar />
+            <TitleBar isFullscreen={isFullscreen} />
 
             <div className="flex flex-1 overflow-hidden">
                 <Sidebar currentView={currentView} onViewChange={setCurrentView} />
