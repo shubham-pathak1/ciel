@@ -446,17 +446,18 @@ pub async fn resume_download<R: Runtime>(
             }
         }
         _ => {
+            let known_single_connection = download.metadata.as_deref() == Some("http_no_range");
             let _ = app.emit("download-progress", serde_json::json!({
                 "id": id,
                 "total": download.size.max(0) as u64,
-                "downloaded": download.downloaded.max(0) as u64,
-                "network_received": download.downloaded.max(0) as u64,
+                "downloaded": if known_single_connection { 0u64 } else { download.downloaded.max(0) as u64 },
+                "network_received": if known_single_connection { 0u64 } else { download.downloaded.max(0) as u64 },
                 "verified_speed": 0u64,
                 "speed": 0u64,
                 "eta": 0u64,
-                "connections": download.connections.max(0) as u64,
-                "status_text": "Resuming...",
-                "status_phase": "resuming",
+                "connections": if known_single_connection { 1u64 } else { 0u64 },
+                "status_text": if known_single_connection { "Restarting..." } else { "Resuming..." },
+                "status_phase": if known_single_connection { "restarting" } else { "resuming" },
                 "phase_elapsed_secs": 0u64,
             }));
             http::start_download_task(

@@ -114,6 +114,8 @@ const getPhaseHint = (phase?: string) => {
             return "restoring";
         case "resuming":
             return "resuming";
+        case "restarting":
+            return "restarting";
         case "verifying_data":
             return "checking files";
         case "finding_peers":
@@ -167,11 +169,11 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
                     d.status === "error"
                         ? d.status_text ?? d.error_message ?? "Download failed"
                         : d.status === "downloading"
-                            ? d.status_text ?? "Restoring session..."
+                            ? d.status_text ?? (d.protocol === "torrent" ? "Restoring session..." : "Connecting...")
                         : d.status_text,
                 status_phase:
                     d.status === "downloading"
-                        ? d.status_phase ?? "restoring_session"
+                        ? d.status_phase ?? (d.protocol === "torrent" ? "restoring_session" : "connecting")
                         : d.status_phase,
                 phase_elapsed_secs:
                     d.status === "downloading"
@@ -504,6 +506,13 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
             showTorrentDebug &&
             download.protocol === "torrent" &&
             (isPreparingFirstPiece || hasNetworkAheadOfVerified);
+        const isHttpNonResumable =
+            download.protocol === "http" && download.metadata === "http_no_range";
+        const showLiveConnections =
+            download.status === "downloading" &&
+            download.status_text !== "Paused" &&
+            !["initializing", "connecting", "resuming", "restoring_session"].includes(statusPhase);
+        const displayConnections = showLiveConnections ? download.connections : 0;
 
         useEffect(() => {
             setVisualProgress(progress);
@@ -535,9 +544,20 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                 ? {
                                     ...d,
                                     status: "downloading",
-                                    status_text: "Restoring session...",
-                                    status_phase: "restoring_session",
+                                    status_text:
+                                        d.protocol === "http"
+                                            ? (d.metadata === "http_no_range" ? "Restarting..." : "Resuming...")
+                                            : "Restoring session...",
+                                    status_phase:
+                                        d.protocol === "http"
+                                            ? (d.metadata === "http_no_range" ? "restarting" : "resuming")
+                                            : "restoring_session",
                                     phase_elapsed_secs: 0,
+                                    connections: d.protocol === "http" ? 0 : d.connections,
+                                    downloaded:
+                                        d.protocol === "http" && d.metadata === "http_no_range"
+                                            ? 0
+                                            : d.downloaded,
                                 }
                                 : d
                         )
@@ -691,6 +711,11 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                                 {getPhaseHint(download.status_phase)}
                                             </span>
                                         )}
+                                        {isHttpNonResumable && (
+                                            <span className="text-[9px] uppercase tracking-wider text-status-warning">
+                                                Non-resumable link
+                                            </span>
+                                        )}
                                         {showTorrentDebug && (isPreparingFirstPiece || hasNetworkAheadOfVerified) && (
                                             <span className="text-[9px] uppercase tracking-wider text-text-tertiary">
                                                 RX {formatSize(networkReceived)} | Verified {formatSize(download.downloaded)}
@@ -698,12 +723,19 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                         )}
                                     </div>
                                 ) : (
-                                    <span className="font-medium tracking-wide">
-                                        {showTorrentDebug && shouldUseNetworkProgress && (
-                                            <span className="text-[9px] uppercase tracking-wider text-text-tertiary mr-1">RX</span>
+                                    <div className="flex items-center gap-2 font-medium tracking-wide">
+                                        <span>
+                                            {showTorrentDebug && shouldUseNetworkProgress && (
+                                                <span className="text-[9px] uppercase tracking-wider text-text-tertiary mr-1">RX</span>
+                                            )}
+                                            {formatSize(displayDownloaded)} <span className="text-text-tertiary font-normal px-1">of</span> {formatSize(totalBytes)}
+                                        </span>
+                                        {isHttpNonResumable && (
+                                            <span className="text-[9px] uppercase tracking-wider text-status-warning">
+                                                Non-resumable link
+                                            </span>
                                         )}
-                                        {formatSize(displayDownloaded)} <span className="text-text-tertiary font-normal px-1">of</span> {formatSize(totalBytes)}
-                                    </span>
+                                    </div>
                                 )}
 
                                 {download.status === 'downloading' && download.status_text !== "Paused" && (
@@ -724,7 +756,7 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
                                         </div>
                                         <div className="flex items-center gap-1 text-text-tertiary">
                                             {download.protocol === 'torrent' ? <Users size={10} /> : <Wifi size={10} />}
-                                            <span>{download.connections}</span>
+                                            <span>{displayConnections}</span>
                                         </div>
                                     </>
                                 )}

@@ -9,7 +9,7 @@ use std::io::Read;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncWriteExt, AsyncSeekExt, BufWriter};
-use std::sync::atomic::{AtomicU64, Ordering, AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
 
 /// A shared token-bucket rate limiter to coordinate multiple download workers.
 /// 
@@ -221,6 +221,39 @@ pub struct Downloader {
 }
 
 impl Downloader {
+    async fn fallback_to_single_connection<F>(
+        &self,
+        on_progress: Arc<F>,
+        reason: &str,
+    ) -> Result<(), DownloadError>
+    where
+        F: Fn(DownloadProgress) + Send + Sync + 'static,
+    {
+        if let Some(ref db) = self.db_path {
+            crate::db::update_download_metadata(db, &self.config.id, Some("http_no_range")).ok();
+            crate::db::delete_download_chunks(db, &self.config.id).ok();
+        }
+
+        let _ = std::fs::remove_file(&self.config.filepath);
+        self.downloaded_atomic.store(0, Ordering::SeqCst);
+
+        {
+            let mut p = self.progress.lock().unwrap();
+            p.downloaded = 0;
+            p.speed = 0;
+            p.eta = 0;
+            p.connections = 1;
+            p.status_text = Some(reason.to_string());
+            p.status_phase = Some("fallback_single".to_string());
+            p.phase_elapsed_secs = Some(0);
+        }
+
+        let snapshot = self.progress.lock().unwrap().clone();
+        on_progress(snapshot);
+
+        self.download_single_connection(move |p| on_progress(p)).await
+    }
+
     pub fn new(config: DownloadConfig) -> Self {
         let progress = Arc::new(std::sync::Mutex::new(DownloadProgress {
             id: config.id.clone(),
@@ -371,8 +404,8 @@ impl Downloader {
             let mut p = self.progress.lock().unwrap();
             p.total = total_size;
             p.filename = filename_opt;
-            p.status_text = Some("Downloading...".to_string());
-            p.status_phase = Some("downloading".to_string());
+            p.status_text = Some("Connecting...".to_string());
+            p.status_phase = Some("connecting".to_string());
             p.phase_elapsed_secs = Some(0);
         }
 
@@ -519,27 +552,21 @@ impl Downloader {
         let start_emit_time = std::time::Instant::now();
 
         loop {
-            // Check for errors from workers
-            if let Some(err) = error_occurred.lock().unwrap().clone() {
-                if matches!(err, DownloadError::NoRangeSupport) && self.config.force_multi {
+            // Check for errors from workers. Keep the lock guard scoped to avoid
+            // holding a non-Send MutexGuard across async await points.
+            let worker_error = { error_occurred.lock().unwrap().clone() };
+            if let Some(err) = worker_error {
+                if matches!(err, DownloadError::NoRangeSupport) {
                     abort_workers.store(true, Ordering::Relaxed);
-                    if let Some(ref db) = self.db_path {
-                        crate::db::delete_download_chunks(db, &self.config.id).ok();
-                    }
-                    let _ = std::fs::remove_file(&self.config.filepath);
-                    self.downloaded_atomic.store(0, Ordering::SeqCst);
-                    {
-                        let mut p = self.progress.lock().unwrap();
-                        p.downloaded = 0;
-                        p.connections = 1;
-                        p.status_text = Some("Server rejected multi-connection. Switching to single...".to_string());
-                        p.status_phase = Some("fallback_single".to_string());
-                        p.phase_elapsed_secs = Some(0);
-                    }
-                    let on_progress_fallback = on_progress_arc.clone();
-                    (on_progress_fallback)(self.progress.lock().unwrap().clone());
+                    println!(
+                        "[{}] Falling back to single connection after range rejection.",
+                        self.config.id
+                    );
                     return self
-                        .download_single_connection(move |p| (on_progress_fallback)(p))
+                        .fallback_to_single_connection(
+                            on_progress_arc.clone(),
+                            "Server rejected parallel download. Switching to single...",
+                        )
                         .await;
                 }
                 return Err(err);
@@ -550,23 +577,15 @@ impl Downloader {
                 let downloaded = self.downloaded_atomic.load(Ordering::Relaxed);
                 if downloaded == 0 && failures >= max_workers as usize && multi_start.elapsed().as_secs() >= 3 {
                     abort_workers.store(true, Ordering::Relaxed);
-                    if let Some(ref db) = self.db_path {
-                        crate::db::delete_download_chunks(db, &self.config.id).ok();
-                    }
-                    let _ = std::fs::remove_file(&self.config.filepath);
-                    self.downloaded_atomic.store(0, Ordering::SeqCst);
-                    {
-                        let mut p = self.progress.lock().unwrap();
-                        p.downloaded = 0;
-                        p.connections = 1;
-                        p.status_text = Some("Multi-connection failed. Switching to single...".to_string());
-                        p.status_phase = Some("fallback_single".to_string());
-                        p.phase_elapsed_secs = Some(0);
-                    }
-                    let on_progress_fallback = on_progress_arc.clone();
-                    (on_progress_fallback)(self.progress.lock().unwrap().clone());
+                    println!(
+                        "[{}] Falling back to single connection after repeated worker failures.",
+                        self.config.id
+                    );
                     return self
-                        .download_single_connection(move |p| (on_progress_fallback)(p))
+                        .fallback_to_single_connection(
+                            on_progress_arc.clone(),
+                            "Parallel download failed. Switching to single...",
+                        )
                         .await;
                 }
             }
@@ -715,6 +734,15 @@ impl Downloader {
                                 return Err(DownloadError::NoRangeSupport);
                             }
 
+                            {
+                                let mut p = progress.lock().unwrap();
+                                if p.status_phase.as_deref() != Some("downloading") {
+                                    p.status_text = Some("Downloading...".to_string());
+                                    p.status_phase = Some("downloading".to_string());
+                                    p.phase_elapsed_secs = Some(0);
+                                }
+                            }
+
                             // Capture content-type for detailed error reporting if decoding fails
                             let content_type = headers
                                 .get(reqwest::header::CONTENT_TYPE)
@@ -800,13 +828,21 @@ impl Downloader {
                         match res {
                             Ok(_) => { break; }
                             Err(e) => {
-                                eprintln!("[{}] Worker error on chunk {}-{}: {}", id_clone, chunk.start, chunk.end, e);
-                                failure_counter.fetch_add(1, Ordering::Relaxed);
                                 if matches!(e, DownloadError::NoRangeSupport) {
                                     abort_signal.store(true, Ordering::Relaxed);
+                                    let mut shared_error = error_ptr.lock().unwrap();
+                                    if shared_error.is_none() {
+                                        eprintln!(
+                                            "[{}] Worker error on chunk {}-{}: {}",
+                                            id_clone, chunk.start, chunk.end, e
+                                        );
+                                        *shared_error = Some(e.clone());
+                                    }
                                     final_error = Some(e);
                                     break;
                                 }
+                                eprintln!("[{}] Worker error on chunk {}-{}: {}", id_clone, chunk.start, chunk.end, e);
+                                failure_counter.fetch_add(1, Ordering::Relaxed);
                                 if let Some(sig) = &cancel_signal {
                                     if sig.load(Ordering::Relaxed) { break; }
                                 }
@@ -834,7 +870,10 @@ impl Downloader {
                     }
 
                     if let Some(e) = final_error {
-                        *error_ptr.lock().unwrap() = Some(e);
+                        let mut shared_error = error_ptr.lock().unwrap();
+                        if shared_error.is_none() {
+                            *shared_error = Some(e);
+                        }
                     }
 
                     *active_ptr.lock().unwrap() -= 1;

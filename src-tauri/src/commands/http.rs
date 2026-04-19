@@ -562,7 +562,12 @@ pub(super) async fn start_download_task<R: Runtime>(
     let url = download.url.clone();
     let filepath = download.filepath.clone();
     let filename = download.filename.clone(); // Clone filename for use in tokio::spawn
-    let connections = download.connections as u8;
+    let known_single_connection = download.metadata.as_deref() == Some("http_no_range");
+    let connections = if known_single_connection {
+        1
+    } else {
+        download.connections as u8
+    };
 
     // Create cancellation channel and signal
     let (tx, mut rx) = mpsc::channel(1);
@@ -606,9 +611,16 @@ pub(super) async fn start_download_task<R: Runtime>(
             speed_limit,
             user_agent: download.user_agent.clone(),
             cookies,
-            force_multi: force_multi_http,
+            force_multi: force_multi_http && !known_single_connection,
             size_hint: if download.size > 0 { Some(download.size as u64) } else { None },
         };
+
+        if known_single_connection {
+            println!(
+                "[{}] Known single-connection HTTP source. Skipping parallel mode.",
+                id
+            );
+        }
 
         let downloader = Downloader::new(config)
             .with_db(db_path.clone())

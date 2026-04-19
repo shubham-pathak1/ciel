@@ -547,6 +547,19 @@ pub fn update_chunk_progress<P: AsRef<Path>>(db_path: P, download_id: &str, star
     Ok(())
 }
 
+pub fn update_download_metadata<P: AsRef<Path>>(
+    db_path: P,
+    id: &str,
+    metadata: Option<&str>,
+) -> SqliteResult<()> {
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "UPDATE downloads SET metadata = ?1 WHERE id = ?2",
+        (metadata, id),
+    )?;
+    Ok(())
+}
+
 /// Removes all chunk records for a specific download.
 pub fn delete_download_chunks<P: AsRef<Path>>(db_path: P, download_id: &str) -> SqliteResult<()> {
     let conn = open_db(db_path)?;
