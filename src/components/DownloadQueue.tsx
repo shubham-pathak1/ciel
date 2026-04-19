@@ -856,6 +856,21 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     const [cookies, setCookies] = useState("");
     const [startPaused, setStartPaused] = useState(false);
     const { settings } = useSettings();
+    const analysisStatusTimers = useRef<number[]>([]);
+    const analysisRunId = useRef(0);
+
+    const clearAnalysisStatusTimers = () => {
+        analysisStatusTimers.current.forEach((timer) => window.clearTimeout(timer));
+        analysisStatusTimers.current = [];
+    };
+
+    const cancelAnalysisFlow = () => {
+        analysisRunId.current += 1;
+        clearAnalysisStatusTimers();
+        setTorrentInfo(null);
+        setStatus(null);
+        setIsAdding(false);
+    };
 
     useEffect(() => {
         const checkClipboard = async () => {
@@ -885,6 +900,10 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         };
         checkClipboard();
     }, [initialUrl]);
+
+    useEffect(() => {
+        return () => clearAnalysisStatusTimers();
+    }, []);
 
     const getSaveLocation = async () => {
         try {
@@ -934,14 +953,34 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                 }
             }
 
+            const currentRunId = ++analysisRunId.current;
             try {
-                setStatus("Analyzing...");
+                clearAnalysisStatusTimers();
+                setStatus("Loading torrent metadata...");
                 const typeInfo = await invoke<any>("validate_url_type", { url: singleUrl });
+                if (analysisRunId.current !== currentRunId) return;
                 if (typeInfo.is_magnet) {
+                    analysisStatusTimers.current = [
+                        window.setTimeout(() => {
+                            if (analysisRunId.current === currentRunId) {
+                                setStatus("Fetching torrent metadata... this torrent may take longer than usual.");
+                            }
+                        }, 8000),
+                        window.setTimeout(() => {
+                            if (analysisRunId.current === currentRunId) {
+                                setStatus("Metadata is taking longer than expected. Your connection, trackers, or peers may be slow. You can keep waiting or cancel and retry.");
+                            }
+                        }, 20000),
+                    ];
                     const info = await invoke<TorrentInfo>("analyze_torrent", { url: singleUrl });
+                    if (analysisRunId.current !== currentRunId) return;
+                    clearAnalysisStatusTimers();
                     setTorrentInfo(info);
-                    setStatus(null);
+                    setStatus("Torrent analyzed. Select files to continue.");
+                    setIsAdding(false);
                 } else {
+                    if (analysisRunId.current !== currentRunId) return;
+                    clearAnalysisStatusTimers();
                     const output_folder = await getSaveLocation();
                     if (output_folder === null) {
                         setIsAdding(false);
@@ -960,9 +999,12 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                     });
                     onAdded();
                     onClose();
+                    setStatus(null);
                     setIsAdding(false);
                 }
             } catch (err) {
+                if (analysisRunId.current !== currentRunId) return;
+                clearAnalysisStatusTimers();
                 setStatus(`Error: ${err}`);
                 setIsAdding(false);
             }
@@ -1024,7 +1066,9 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     };
 
     const handleTorrentSelect = async (indices: number[]) => {
+        clearAnalysisStatusTimers();
         setIsAdding(true);
+        setStatus("Starting torrent...");
         try {
             const output_folder = await getSaveLocation();
             if (output_folder === null) {
@@ -1041,6 +1085,7 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                 outputFolder: output_folder || null,
                 startPaused
             });
+            setStatus(null);
             onAdded();
             onClose();
         } catch (err) {
@@ -1160,7 +1205,15 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                                 </div>
                             )}
                             <div className="flex justify-end gap-3 mt-8">
-                                <button onClick={onClose} className="px-4 py-2 text-text-secondary text-sm" disabled={isAdding}>Cancel</button>
+                                <button
+                                    onClick={() => {
+                                        cancelAnalysisFlow();
+                                        onClose();
+                                    }}
+                                    className="px-4 py-2 text-text-secondary text-sm"
+                                >
+                                    Cancel
+                                </button>
                                 {settings.scheduler_enabled && (
                                     <button
                                         onClick={() => handleAdd(true)}
@@ -1171,9 +1224,9 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                                         <span>Schedule</span>
                                     </button>
                                 )}
-                                <button onClick={() => handleAdd(false)} disabled={isAdding || !url} className="btn-primary text-sm">
-                                    {isAdding ? "Analyzing..." : "Add Download"}
-                                </button>
+                        <button onClick={() => handleAdd(false)} disabled={isAdding || !url} className="btn-primary text-sm">
+                                    {isAdding ? "Working..." : "Add Download"}
+                        </button>
                             </div>
                         </div>
                     </motion.div>
@@ -1185,7 +1238,9 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
                     <TorrentFileSelector
                         info={torrentInfo}
                         onSelect={handleTorrentSelect}
-                        onCancel={() => { setTorrentInfo(null); setIsAdding(false); }}
+                        onCancel={() => {
+                            cancelAnalysisFlow();
+                        }}
                     />
                 </ModalPortal>
             )}
