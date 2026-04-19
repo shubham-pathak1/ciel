@@ -99,9 +99,9 @@ export const History: React.FC = () => {
     );
 
     return (
-        <div className="h-full flex flex-col w-full p-4 sm:p-6 lg:p-8">
+        <div className="h-full flex flex-col w-full px-8 pt-5 pb-6">
             {/* Header */}
-            <div className="flex items-end justify-between mb-8 sticky top-0 bg-brand-primary z-20 py-4 border-b border-transparent">
+            <div className="flex items-end justify-between mb-6 sticky top-0 bg-brand-primary z-20 pb-3 border-b border-transparent">
                 <div>
                     <h1 className="text-2xl font-semibold text-text-primary tracking-tight mb-1">History</h1>
                     <p className="text-sm text-text-secondary">

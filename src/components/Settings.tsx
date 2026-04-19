@@ -590,9 +590,9 @@ export function Settings() {
     };
 
     return (
-        <div className="h-full flex flex-col w-full">
+        <div className="h-full flex flex-col w-full px-8 pt-5 pb-6">
             {/* Header */}
-            <div className="mb-8 flex items-end justify-between sticky top-0 bg-brand-primary z-20 py-4 border-b border-transparent">
+            <div className="mb-6 flex items-end justify-between sticky top-0 bg-brand-primary z-20 pb-3 border-b border-transparent">
                 <div>
                     <h1 className="text-2xl font-semibold text-text-primary tracking-tight mb-1">Settings</h1>
                     <p className="text-sm text-text-secondary">Personalize your downloading experience</p>
