@@ -16,6 +16,7 @@ impl TorrentManager {
         db_path: String,
         indices: Option<Vec<usize>>,
         total_size: u64,
+        known_downloaded_baseline: u64,
         is_resume: bool,
         start_paused: bool,
         source_torrent_bytes: Option<Vec<u8>>,
@@ -145,13 +146,17 @@ impl TorrentManager {
             };
             let mut phase_started_at = std::time::Instant::now();
             let startup_started_at = std::time::Instant::now();
-            let startup_baseline_bytes = handle.stats().progress_bytes;
+            let startup_baseline_bytes = if is_resume {
+                known_downloaded_baseline
+            } else {
+                handle.stats().progress_bytes
+            };
             let startup_baseline_fetched = handle
                 .stats()
                 .live
                 .as_ref()
                 .map(|l| l.snapshot.fetched_bytes)
-                .unwrap_or(0);
+                .unwrap_or(startup_baseline_bytes);
             let mut startup_metadata_at: Option<std::time::Duration> = None;
             let mut startup_live_at: Option<std::time::Duration> = None;
             let mut startup_peers_at: Option<std::time::Duration> = None;
@@ -167,18 +172,23 @@ impl TorrentManager {
                 .as_ref()
                 .map(|l| l.snapshot.peer_stats.live)
                 .unwrap_or(0) as u64;
-            let network_received = stats
+            let initial_network_received = stats
                 .live
                 .as_ref()
                 .map(|l| l.snapshot.fetched_bytes)
-                .unwrap_or(stats.progress_bytes);
+                .unwrap_or(startup_baseline_bytes);
+            let initial_downloaded = if is_resume {
+                startup_baseline_bytes
+            } else {
+                stats.progress_bytes
+            };
             let _ = app.emit(
                 "download-progress",
                 serde_json::json!({
                     "id": id_clone,
                     "total": if stats.total_bytes > 0 { stats.total_bytes } else { total_size },
-                    "downloaded": stats.progress_bytes,
-                    "network_received": network_received,
+                    "downloaded": initial_downloaded,
+                    "network_received": initial_network_received.max(initial_downloaded),
                     "verified_speed": 0u64,
                     "speed": 0,
                     "eta": 0,
@@ -227,10 +237,25 @@ impl TorrentManager {
                 if startup_first_network_at.is_none() && fetched_now > startup_baseline_fetched {
                     startup_first_network_at = Some(startup_elapsed);
                 }
-                if startup_first_byte_at.is_none() && downloaded_now > startup_baseline_bytes {
+                if startup_first_byte_at.is_none()
+                    && stats.live.is_some()
+                    && downloaded_now > startup_baseline_bytes
+                {
                     startup_first_byte_at = Some(startup_elapsed);
                 }
-                let network_received = fetched_now.max(downloaded_now);
+                let is_restore_verifying = is_resume
+                    && stats.live.is_none()
+                    && downloaded_now > startup_baseline_bytes;
+                let display_downloaded = if is_restore_verifying {
+                    startup_baseline_bytes
+                } else {
+                    downloaded_now.max(startup_baseline_bytes)
+                };
+                let network_received = if is_restore_verifying {
+                    startup_baseline_bytes
+                } else {
+                    fetched_now.max(display_downloaded)
+                };
 
                 if elapsed >= 0.5 {
                     let diff = downloaded_now.saturating_sub(last_downloaded);
@@ -567,7 +592,7 @@ impl TorrentManager {
                             connections,
                             speed_u64,
                             network_received,
-                            stats.progress_bytes
+                            display_downloaded
                         );
                         phase_key = phase_next.to_string();
                         phase_started_at = now;
@@ -579,7 +604,7 @@ impl TorrentManager {
                         serde_json::json!({
                             "id": id_clone,
                             "total": stats.total_bytes,
-                            "downloaded": stats.progress_bytes,
+                            "downloaded": display_downloaded,
                             "network_received": network_received,
                             "verified_speed": verified_speed_u64,
                             "speed": speed_u64,

@@ -433,6 +433,7 @@ pub async fn resume_download<R: Runtime>(
                         db_state.path.clone(),
                         indices,
                         download.size as u64,
+                        download.downloaded.max(0) as u64,
                         true,
                         false,
                         None,
@@ -754,6 +755,7 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
                         db_state.path.clone(),
                         indices,
                         next_download.size as u64,
+                        next_download.downloaded.max(0) as u64,
                         true,  // is_resume
                         false, // start_paused
                         None,
