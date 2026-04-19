@@ -1,54 +1,60 @@
 # Ciel
 
-Ciel is a high-performance, open-source download manager for Windows built with **Tauri** and **Rust**. I've designed it to provide a clean, bloat-free experience focused on core efficiency and ease of use.
+Ciel is a Windows download manager built with Tauri, Rust, and React.
 
-## Core Features
-- **Parallel Downloading**: Optimized multi-threaded HTTP engine with segment-based chunk management.
-- **Torrent Support**: Full magnet link support with content preview and metadata polling.
-- **Clipboard Monitoring**: "Autocatch" technology detects URLs in your clipboard for seamless link addition (respects privacy settings).
-- **Smart Categorization**: Automatically organizes downloads into Music, Archives, Software, and Documents based on file extensions.
-- **Download Scheduler**: Plan your queue to start or pause at specific times for better bandwidth management.
+It focuses on two things:
+- fast HTTP downloads with parallel connections
+- torrent downloads with pause, resume, and file selection
 
-## Advanced Capabilities
-- **Session Support**: Provide custom User-Agents and Cookies to bypass restrictions on premium file hosts.
-- **Automation**: Automatic folder reveal upon completion, system shutdown options, and sound notifications.
-- **Privacy Focus**: Completely offline-first. No tracking, no telemetry, no accounts. All data stays local.
+Ciel is still moving toward a proper public beta, but the core app is already usable and the recent work has been focused on stability rather than feature sprawl.
 
-## Reason behind removing yt-dlp(youtube downloads feature)
-Ciel previously included a specialized YouTube download feature integration via `yt-dlp` and `FFmpeg`. However, due to the constant changes in platform bot-detection, cookie-locking, and the instability of maintaining specialized sidecars (which bloated the binary by over 100MB), I have made the strategic decision to **strip this feature** from the core application. 
+## What Ciel currently does
+- Parallel HTTP downloading
+- Safe fallback to single connection when a server rejects range requests
+- HTTP pause/resume and restart recovery
+- Magnet torrent support
+- Torrent file selection before starting
+- Torrent pause/resume in the same session
+- Torrent resume after restart and crash recovery improvements
+- Clipboard autocatch
+- Download scheduler
+- Category-based organization
+- Local-first settings and SQLite-backed state
 
-My goal is to keep Ciel as a **lean, 100% stable, and sidecar-free** download manager. 
+## Current focus
+Right now the project is mainly about making the existing downloader more reliable:
+- cleaner HTTP fallback behavior
+- better torrent restore and verification UX
+- fewer misleading states in the UI
+- getting the app ready for a stable beta
 
-> [!TIP]
-> **Extension Support?** If the community demands it, I may release a separate YouTube/Video extension that adds these sidecars back as optional plugins. For now, Ciel remains focused on being the fastest and most reliable manager for Direct (HTTP) and Torrent downloads.
+## Notes
+- Ciel is sidecar-free.
+- The HTTP engine is custom.
+- Torrent support is powered by `librqbit`.
+- YouTube / `yt-dlp` support was intentionally removed to keep the app leaner and easier to maintain.
 
-## Internal Engines
-Ciel is now completely **sidecar-free**. 
-- **HTTP Engine**: A custom Rust-based multi-threaded downloader.
-- **Torrent Engine**: Powered by a lightweight, memory-efficient BitTorrent implementation.
-
-## Development Setup
-
-I welcome contributions! As a solo developer, I'm always looking for extra hands to help polish features or fix bugs. To get started with the development environment:
-
+## Development
 ```bash
-# 1. Install dependencies
 npm install
-
-# 2. Run in development mode
 npm run tauri dev
+```
 
-# 3. Build for production (Windows)
+Production build:
+```bash
 npm run tauri build
 ```
 
-### Custom Build Directory
-Rust target directories can be quite large. You can customize your build path:
-1. Copy `src-tauri/.cargo/config.toml.example` to `src-tauri/.cargo/config.toml`.
-2. Update the `target-dir` key to your preferred location.
+If you want a separate Rust target directory, copy:
+- `src-tauri/.cargo/config.toml.example`
+
+to:
+- `src-tauri/.cargo/config.toml`
+
+and set your preferred `target-dir`.
 
 ## Contributing
-Ciel is an open-source project. If you find a bug or have a suggestion, please feel free to open an issue or submit a pull request. As I'm maintaining this project on my own, I truly appreciate any help in making Ciel better for everyone.
+Issues and pull requests are welcome. If you run into a bug, a clear repro and logs help a lot.
 
 ## License
 MIT

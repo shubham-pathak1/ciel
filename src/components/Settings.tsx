@@ -522,10 +522,7 @@ export function Settings() {
                             label="Torrent Encryption"
                             description="Ciel currently uses the librqbit engine for Protocol Encryption(PE), for more privacy and security please use a VPN."
                         >
-                            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-text-primary/5 border border-text-primary/10 text-text-secondary text-[10px] font-medium">
-                                <Shield size={10} className="text-text-primary" />
-                                <span>AUTOMATED</span>
-                            </div>
+                            <div className="w-8" />
                         </SettingItem>
                     </div>
                 );
@@ -593,7 +590,7 @@ export function Settings() {
     };
 
     return (
-        <div className="h-full flex flex-col w-full max-w-5xl mx-auto">
+        <div className="h-full flex flex-col w-full">
             {/* Header */}
             <div className="mb-8 flex items-end justify-between sticky top-0 bg-brand-primary z-20 py-4 border-b border-transparent">
                 <div>

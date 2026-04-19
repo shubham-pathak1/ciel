@@ -99,7 +99,7 @@ export const History: React.FC = () => {
     );
 
     return (
-        <div className="h-full flex flex-col w-full max-w-5xl mx-auto p-4 sm:p-6 lg:p-8">
+        <div className="h-full flex flex-col w-full p-4 sm:p-6 lg:p-8">
             {/* Header */}
             <div className="flex items-end justify-between mb-8 sticky top-0 bg-brand-primary z-20 py-4 border-b border-transparent">
                 <div>

@@ -72,73 +72,51 @@ export function Sidebar({ currentView, onViewChange }: SidebarProps) {
         mainNavItems.splice(3, 0, { id: "scheduler", label: "Scheduler", icon: Clock });
     }
 
+    const renderNavItem = (item: NavItem) => {
+        const Icon = item.icon;
+        const isActive = currentView === item.id;
+
+        return (
+            <li key={item.id} className="relative group flex justify-center">
+                <button
+                    onClick={() => onViewChange(item.id)}
+                    aria-label={item.label}
+                    title={item.label}
+                    className={clsx(
+                        "relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200",
+                        isActive
+                            ? "text-text-primary"
+                            : "text-text-secondary hover:text-text-primary hover:bg-brand-tertiary/40"
+                    )}
+                >
+                    {isActive && (
+                        <motion.div
+                            layoutId="active-pill"
+                            className="absolute inset-0 bg-brand-tertiary rounded-xl"
+                            transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                        />
+                    )}
+                    <Icon size={19} className={clsx("relative z-10", isActive ? "text-text-primary" : "text-text-tertiary")} />
+                </button>
+
+                <div className="pointer-events-none absolute left-[calc(100%+12px)] top-1/2 z-30 -translate-y-1/2 rounded-lg border border-surface-border bg-brand-secondary px-2.5 py-1.5 text-xs font-medium text-text-primary opacity-0 shadow-xl transition-all duration-150 group-hover:opacity-100 whitespace-nowrap">
+                    {item.label}
+                </div>
+            </li>
+        );
+    };
+
     return (
-        <aside className="w-64 flex flex-col items-center py-6 px-4 bg-brand-primary border-r border-surface-border z-20">
+        <aside className="w-[72px] flex flex-col items-center py-6 px-1.5 bg-brand-primary border-r border-surface-border z-20">
             {/* Navigation */}
             <nav className="w-full flex-1">
-                <ul className="space-y-1">
-                    {mainNavItems.map((item) => {
-                        const Icon = item.icon;
-                        const isActive = currentView === item.id;
-
-                        return (
-                            <li key={item.id} className="relative">
-                                <button
-                                    onClick={() => onViewChange(item.id)}
-                                    className={clsx(
-                                        "w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 text-sm relative z-10",
-                                        isActive
-                                            ? "text-text-primary font-medium"
-                                            : "text-text-secondary hover:text-text-primary"
-                                    )}
-                                >
-                                    {isActive && (
-                                        <motion.div
-                                            layoutId="active-pill"
-                                            className="absolute inset-0 bg-brand-tertiary rounded-lg z-[-1]"
-                                            transition={{ type: "spring", stiffness: 500, damping: 40 }}
-                                        />
-                                    )}
-                                    <Icon size={18} className={isActive ? "text-text-primary" : "text-text-tertiary"} />
-                                    <span>{item.label}</span>
-                                </button>
-                            </li>
-                        );
-                    })}
+                <ul className="space-y-2">
+                    {mainNavItems.map(renderNavItem)}
                 </ul>
 
-                <div className="mt-8 mb-2 px-3 text-[10px] font-bold text-text-tertiary uppercase tracking-wider">
-                    Categories
-                </div>
-                <ul className="space-y-1">
-                    {categoryItems.map((item) => {
-                        const Icon = item.icon;
-                        const isActive = currentView === item.id;
-
-                        return (
-                            <li key={item.id} className="relative">
-                                <button
-                                    onClick={() => onViewChange(item.id)}
-                                    className={clsx(
-                                        "w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 text-sm relative z-10",
-                                        isActive
-                                            ? "text-text-primary font-medium"
-                                            : "text-text-secondary hover:text-text-primary"
-                                    )}
-                                >
-                                    {isActive && (
-                                        <motion.div
-                                            layoutId="active-pill"
-                                            className="absolute inset-0 bg-brand-tertiary rounded-lg z-[-1]"
-                                            transition={{ type: "spring", stiffness: 500, damping: 40 }}
-                                        />
-                                    )}
-                                    <Icon size={18} className={isActive ? "text-text-primary" : "text-text-tertiary"} />
-                                    <span>{item.label}</span>
-                                </button>
-                            </li>
-                        );
-                    })}
+                <div className="mx-auto my-5 h-px w-8 bg-surface-border" />
+                <ul className="space-y-2">
+                    {categoryItems.map(renderNavItem)}
                 </ul>
             </nav>
 
