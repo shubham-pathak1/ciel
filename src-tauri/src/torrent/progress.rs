@@ -47,7 +47,13 @@ impl TorrentManager {
             paused.insert(id.clone());
         }
 
-        let response = match source_torrent_bytes {
+        let local_torrent_bytes = if source_torrent_bytes.is_none() {
+            Self::read_local_torrent_bytes(&magnet)?
+        } else {
+            None
+        };
+
+        let response = match source_torrent_bytes.or(local_torrent_bytes) {
             Some(torrent_bytes) => {
                 let options = librqbit::AddTorrentOptions {
                     only_files: indices.clone(),

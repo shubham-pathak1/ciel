@@ -1,6 +1,7 @@
 use crate::torrent::types::{TorrentFile, TorrentInfo};
 use librqbit::{ManagedTorrent, Session};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -30,6 +31,23 @@ pub struct TorrentStatsSnapshot {
 }
 
 impl TorrentManager {
+    pub(super) fn read_local_torrent_bytes(source: &str) -> Result<Option<Vec<u8>>, String> {
+        let path = Path::new(source);
+        let is_torrent_file = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("torrent"))
+            .unwrap_or(false);
+
+        if !is_torrent_file || !path.is_file() {
+            return Ok(None);
+        }
+
+        std::fs::read(path)
+            .map(Some)
+            .map_err(|e| format!("Failed to read .torrent file: {}", e))
+    }
+
     pub(super) fn extract_initial_peers_from_magnet(
         magnet: &str,
     ) -> Vec<std::net::SocketAddr> {
@@ -162,7 +180,8 @@ impl TorrentManager {
         self.analyzed_torrents.lock().await.remove(analysis_id)
     }
 
-    /// Metadata Sniffer: Briefly joins a swarm to extract the file tree and total size.
+    /// Metadata Sniffer: briefly loads a magnet or local `.torrent` file to extract
+    /// the file tree and total size.
     pub async fn analyze_magnet(&self, magnet: String) -> Result<TorrentInfo, String> {
         let session_guard = self.session.lock().await;
         let session = session_guard
@@ -178,8 +197,15 @@ impl TorrentManager {
             overwrite: true,
             ..Default::default()
         };
+        let source_bytes = Self::read_local_torrent_bytes(&magnet)?;
         let response = session
-            .add_torrent(librqbit::AddTorrent::from_url(magnet), Some(options))
+            .add_torrent(
+                match source_bytes {
+                    Some(bytes) => librqbit::AddTorrent::from_bytes(bytes),
+                    None => librqbit::AddTorrent::from_url(magnet),
+                },
+                Some(options),
+            )
             .await
             .map_err(|e| e.to_string())?;
 

@@ -133,6 +133,18 @@ const getPhaseHint = (phase?: string) => {
     }
 };
 
+const isLocalTorrentPath = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (/^[a-z]+:\/\//i.test(trimmed) || trimmed.startsWith("magnet:")) return false;
+    return /\.torrent$/i.test(trimmed);
+};
+
+const getPathLeafName = (value: string) => {
+    const normalized = value.replace(/\\/g, "/");
+    return normalized.split("/").pop() || value;
+};
+
 /**
  * Main Download Queue Component.
  * 
@@ -858,6 +870,7 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
     const { settings } = useSettings();
     const analysisStatusTimers = useRef<number[]>([]);
     const analysisRunId = useRef(0);
+    const selectedTorrentFile = mode === "single" && isLocalTorrentPath(url) ? getPathLeafName(url) : null;
 
     const clearAnalysisStatusTimers = () => {
         analysisStatusTimers.current.forEach((timer) => window.clearTimeout(timer));
@@ -922,6 +935,23 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         return undefined;
     };
 
+    const handleTorrentFileBrowse = async () => {
+        try {
+            const selected = await open({
+                multiple: false,
+                filters: [{ name: "Torrent Files", extensions: ["torrent"] }],
+            });
+
+            if (typeof selected === "string") {
+                setMode("single");
+                setUrl(selected);
+                setStatus(null);
+            }
+        } catch (err) {
+            setStatus(`Error: ${err}`);
+        }
+    };
+
     const handleAdd = async (paused: boolean = false) => {
         if (!url) return;
 
@@ -944,9 +974,10 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
         // Single Mode: use the interactive flow (for torrent file selection)
         if (mode === "single") {
             const singleUrl = urls[0];
+            const isTorrentFile = isLocalTorrentPath(singleUrl);
             try { new URL(singleUrl); } catch (e) {
                 // Allow magnet links even if URL parser fails
-                if (!singleUrl.startsWith("magnet:")) {
+                if (!singleUrl.startsWith("magnet:") && !isTorrentFile) {
                     setStatus("Error: Invalid URL");
                     setIsAdding(false);
                     return;
@@ -957,9 +988,13 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
             try {
                 clearAnalysisStatusTimers();
                 setStatus("Loading torrent metadata...");
-                const typeInfo = await invoke<any>("validate_url_type", { url: singleUrl });
-                if (analysisRunId.current !== currentRunId) return;
-                if (typeInfo.is_magnet) {
+                let typeInfo: any = null;
+                if (!isTorrentFile) {
+                    typeInfo = await invoke<any>("validate_url_type", { url: singleUrl });
+                    if (analysisRunId.current !== currentRunId) return;
+                }
+
+                if (isTorrentFile || typeInfo.is_magnet) {
                     analysisStatusTimers.current = [
                         window.setTimeout(() => {
                             if (analysisRunId.current === currentRunId) {
@@ -1026,29 +1061,43 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
             setStatus(`Adding ${i + 1}/${urls.length}...`);
 
             try {
-                const typeInfo = await invoke<any>("validate_url_type", { url: currentUrl });
-
-                if (typeInfo.is_magnet) {
-                    // For bulk, we bypass interactive selection and download ALL files (indices: null)
+                if (isLocalTorrentPath(currentUrl)) {
+                    const info = await invoke<TorrentInfo>("analyze_torrent", { url: currentUrl });
                     await invoke("add_torrent", {
                         url: currentUrl,
-                        filename: "Torrent", // Backend will eventually fetch metadata
+                        filename: info.name || getPathLeafName(currentUrl),
                         filepath: "",
-                        indices: null, // Select all files
+                        indices: info.files.map((file) => file.index),
+                        analysisId: info.id || null,
+                        totalSize: info.total_size || null,
                         outputFolder: output_folder || null,
                         startPaused: paused
                     });
                 } else {
-                    await invoke("add_download", {
-                        url: typeInfo.resolved_url || currentUrl,
-                        filename: typeInfo.hinted_filename || "download",
-                        filepath: "",
-                        outputFolder: output_folder || null,
-                        userAgent: userAgent || null,
-                        cookies: cookies || null,
-                        size: typeInfo.content_length ?? null,
-                        startPaused: paused
-                    });
+                    const typeInfo = await invoke<any>("validate_url_type", { url: currentUrl });
+
+                    if (typeInfo.is_magnet) {
+                    // For bulk, we bypass interactive selection and download ALL files (indices: null)
+                        await invoke("add_torrent", {
+                            url: currentUrl,
+                            filename: "Torrent", // Backend will eventually fetch metadata
+                            filepath: "",
+                            indices: null, // Select all files
+                            outputFolder: output_folder || null,
+                            startPaused: paused
+                        });
+                    } else {
+                        await invoke("add_download", {
+                            url: typeInfo.resolved_url || currentUrl,
+                            filename: typeInfo.hinted_filename || "download",
+                            filepath: "",
+                            outputFolder: output_folder || null,
+                            userAgent: userAgent || null,
+                            cookies: cookies || null,
+                            size: typeInfo.content_length ?? null,
+                            startPaused: paused
+                        });
+                    }
                 }
                 successCount++;
             } catch (err) {
@@ -1133,15 +1182,72 @@ function AddDownloadModal({ onClose, onAdded, initialUrl = "" }: { onClose: () =
 
                         <div className="space-y-4">
                             {mode === "single" ? (
-                                <input
-                                    autoFocus
-                                    type="text"
-                                    value={url}
-                                    onChange={(e) => setUrl(e.target.value)}
-                                    placeholder="https://..."
-                                    className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
-                                    onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-                                />
+                                <>
+                                    <div className="flex gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                if (selectedTorrentFile) {
+                                                    setUrl("");
+                                                    setStatus(null);
+                                                }
+                                            }}
+                                            className={clsx(
+                                                "flex-1 rounded-lg border px-3 py-2 text-sm transition-colors",
+                                                !selectedTorrentFile
+                                                    ? "border-text-secondary bg-brand-tertiary text-text-primary"
+                                                    : "border-surface-border bg-brand-primary text-text-secondary hover:text-text-primary"
+                                            )}
+                                        >
+                                            Paste Link or Magnet
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={handleTorrentFileBrowse}
+                                            className={clsx(
+                                                "flex-1 rounded-lg border px-3 py-2 text-sm transition-colors inline-flex items-center justify-center gap-2",
+                                                selectedTorrentFile
+                                                    ? "border-text-secondary bg-brand-tertiary text-text-primary"
+                                                    : "border-surface-border bg-brand-primary text-text-secondary hover:text-text-primary"
+                                            )}
+                                        >
+                                            <FileDown size={14} />
+                                            Choose .torrent
+                                        </button>
+                                    </div>
+
+                                    {selectedTorrentFile ? (
+                                        <div className="rounded-lg border border-surface-border bg-brand-primary px-4 py-3">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <div className="text-sm font-medium text-text-primary truncate">
+                                                        {selectedTorrentFile}
+                                                    </div>
+                                                    <div className="text-xs text-text-secondary truncate mt-1">
+                                                        Local .torrent file selected
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleTorrentFileBrowse}
+                                                    className="text-xs text-text-secondary hover:text-text-primary transition-colors shrink-0"
+                                                >
+                                                    Change
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <input
+                                            autoFocus
+                                            type="text"
+                                            value={url}
+                                            onChange={(e) => setUrl(e.target.value)}
+                                            placeholder="https://... or magnet:?"
+                                            className="w-full bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono text-sm"
+                                            onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+                                        />
+                                    )}
+                                </>
                             ) : (
                                 <textarea
                                     autoFocus
