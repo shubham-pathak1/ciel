@@ -268,12 +268,21 @@ export function DownloadQueue({ filter, category }: DownloadQueueProps) {
                         // Prevent overwriting completed status with late progress events
                         if (d.status === "completed") return d;
 
+                        const total = Math.max(progress.total, 0);
+                        const downloaded = total > 0
+                            ? Math.min(Math.max(progress.downloaded, 0), total)
+                            : Math.max(progress.downloaded, 0);
+                        const networkReceivedRaw = progress.network_received ?? progress.downloaded;
+                        const networkReceived = total > 0
+                            ? Math.min(Math.max(networkReceivedRaw, downloaded), total)
+                            : Math.max(networkReceivedRaw, downloaded);
+
                         return {
                             ...d,
-                            downloaded: progress.downloaded,
-                            network_received: progress.network_received ?? progress.downloaded,
+                            downloaded,
+                            network_received: networkReceived,
                             verified_speed: progress.verified_speed ?? progress.speed,
-                            size: progress.total,
+                            size: total,
                             speed: progress.speed,
                             eta: progress.eta,
                             connections: progress.connections,
@@ -476,7 +485,9 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
 }>(
     ({ download, onRefresh, setDownloads, showTorrentDebug }, ref) => {
         const totalBytes = Math.max(download.size, 0);
-        const verifiedBytes = Math.max(download.downloaded, 0);
+        const verifiedBytes = totalBytes > 0
+            ? Math.min(Math.max(download.downloaded, 0), totalBytes)
+            : Math.max(download.downloaded, 0);
         const [visualProgress, setVisualProgress] = useState(0);
         const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
         const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -484,7 +495,10 @@ const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
         const [isDeleting, setIsDeleting] = useState(false);
         const statusText = download.status_text ?? "";
         const statusPhase = download.status_phase ?? "";
-        const networkReceived = Math.max(download.network_received ?? verifiedBytes, verifiedBytes);
+        const networkReceivedRaw = Math.max(download.network_received ?? verifiedBytes, verifiedBytes);
+        const networkReceived = totalBytes > 0
+            ? Math.min(networkReceivedRaw, totalBytes)
+            : networkReceivedRaw;
         const isPreparingFirstPiece =
             statusPhase === "preparing_first_piece" ||
             statusText.toLowerCase().includes("preparing first piece");
