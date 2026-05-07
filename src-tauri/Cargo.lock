@@ -850,6 +850,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
  "url",
  "uuid",
  "window-vibrancy 0.5.3",

@@ -310,9 +310,9 @@ fn get_cookies_from_firefox_deep(url_str: &str) -> Option<String> {
     let app_data = std::env::var("APPDATA").ok()?;
     let profiles_path = Path::new(&app_data).join("Mozilla").join("Firefox").join("Profiles");
 
-    println!("[Firefox] Scaning for profiles in: {:?}", profiles_path);
+    tracing::info!("[Firefox] Scaning for profiles in: {:?}", profiles_path);
     if !profiles_path.exists() {
-        println!("[Firefox] Profiles directory not found.");
+        tracing::info!("[Firefox] Profiles directory not found.");
         return None;
     }
 
@@ -323,7 +323,7 @@ fn get_cookies_from_firefox_deep(url_str: &str) -> Option<String> {
         for entry in entries.flatten() {
             let cookie_db = entry.path().join("cookies.sqlite");
             if cookie_db.exists() {
-                println!("[Firefox] Found profile with cookies: {:?}", entry.path());
+                tracing::info!("[Firefox] Found profile with cookies: {:?}", entry.path());
                 // 3. SECRETS OF THE DEEP: Copy the database to bypass Firefox's file lock
                 let temp_db = std::env::temp_dir().join(format!("ciel_tmp_cookies_{}.sqlite", uuid::Uuid::new_v4()));
                 if fs::copy(&cookie_db, &temp_db).is_ok() {
@@ -352,7 +352,7 @@ fn get_cookies_from_firefox_deep(url_str: &str) -> Option<String> {
                                     }
                                 }
                             }
-                            println!(
+                            tracing::info!(
                                 "[Firefox] Extracted {} relevant cookies from this profile.",
                                 all_cookies.len()
                             );
@@ -415,7 +415,7 @@ fn get_cookies_from_browser(browser: &str, url: &str) -> Option<String> {
             }
         }
         Err(e) => {
-            eprintln!("Failed to extract cookies from {}: {}", browser, e);
+            tracing::error!("Failed to extract cookies from {}: {}", browser, e);
             None
         }
     }
@@ -616,7 +616,7 @@ pub(super) async fn start_download_task<R: Runtime>(
         };
 
         if known_single_connection {
-            println!(
+            tracing::info!(
                 "[{}] Known single-connection HTTP source. Skipping parallel mode.",
                 id
             );

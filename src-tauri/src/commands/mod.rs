@@ -2,7 +2,7 @@ pub mod http;
 pub mod torrent;
 
 pub use http::{add_download, validate_url_type, DownloadManager, UrlTypeInfo};
-pub use torrent::{add_torrent, analyze_torrent, run_torrent_diagnostics, start_selective_torrent};
+pub use torrent::{add_torrent, analyze_torrent, start_selective_torrent};
 
 use crate::db::{self, DbState, Download, DownloadProtocol, DownloadStatus};
 use crate::torrent::TorrentManager;
@@ -341,7 +341,7 @@ pub async fn resume_download<R: Runtime>(
                         && snapshot.live_peers == 0
                         && snapshot.progress_bytes <= resume_watch_baseline
                     {
-                        println!(
+                        tracing::info!(
                             "[Torrent][Resume][{}] watchdog_stuck progress={} peers={} live={}",
                             resume_watch_id,
                             snapshot.progress_bytes,
@@ -362,7 +362,7 @@ pub async fn resume_download<R: Runtime>(
                 }
             });
 
-            println!(
+            tracing::info!(
                 "[Torrent][Resume][{}] requested status_before={} downloaded={} total={} info_hash={} meta_len={} url_len={}",
                 id,
                 download.status.as_str(),
@@ -387,7 +387,7 @@ pub async fn resume_download<R: Runtime>(
             }));
 
             if !torrent_manager.wait_until_ready(30000).await {
-                println!("[Torrent][Resume][{}] engine_not_ready timeout_ms=30000", id);
+                tracing::info!("[Torrent][Resume][{}] engine_not_ready timeout_ms=30000", id);
                 let msg = "Torrent engine is still initializing. Please wait a moment and try again.".to_string();
                 set_and_emit_download_error(&app, &db_state.path, &id, &msg);
                 return Err(msg);
@@ -396,7 +396,7 @@ pub async fn resume_download<R: Runtime>(
             // Try to resume existing in-memory session first.
             let in_memory_active = torrent_manager.is_active(&id).await;
             if in_memory_active {
-                println!("[Torrent][Resume][{}] path=in_memory_handle", id);
+                tracing::info!("[Torrent][Resume][{}] path=in_memory_handle", id);
                 if let Err(e) = torrent_manager.resume_torrent(&id).await {
                     let msg = format!("Failed to resume torrent: {}", e);
                     set_and_emit_download_error(&app, &db_state.path, &id, &msg);
@@ -417,7 +417,7 @@ pub async fn resume_download<R: Runtime>(
                         return Err(msg);
                     }
                 };
-                println!(
+                tracing::info!(
                     "[Torrent][Resume][{}] path=readd_to_session selected_files={} output_folder={}",
                     id,
                     indices.as_ref().map(|v| v.len()).unwrap_or(0),
@@ -506,7 +506,7 @@ pub async fn delete_download(
         // 2. Clear from DB FIRST to ensure it doesn't "ghost" back into the UI.
         // This makes the deletion feel instant to the user.
         db::delete_download_by_id(&db_state.path, &id).map_err(|e| {
-            eprintln!("Failed to delete DB record for {}: {}", id, e);
+            tracing::error!("Failed to delete DB record for {}: {}", id, e);
             e.to_string()
         })?;
 
@@ -696,18 +696,18 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
             Ok(Some(d)) => d,
             Ok(None) => break, // No more queued items
             Err(e) => {
-                eprintln!("Failed to fetch queued download: {}", e);
+                tracing::error!("Failed to fetch queued download: {}", e);
                 break;
             }
         };
 
         // 3. Start Download
         let id = next_download.id.clone();
-        println!("Queue Processor: Starting {}", next_download.filename);
+        tracing::info!("Queue Processor: Starting {}", next_download.filename);
 
         // Update status first to prevent race conditions (double starting)
         if let Err(e) = db::update_download_status(&db_state.path, &id, DownloadStatus::Downloading) {
-            eprintln!("Failed to update status for {}: {}", id, e);
+            tracing::error!("Failed to update status for {}: {}", id, e);
             continue;
         }
 
@@ -724,7 +724,7 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
                 )
                 .await
                 {
-                    eprintln!("Failed to start queued HTTP download {}: {}", id, e);
+                    tracing::error!("Failed to start queued HTTP download {}: {}", id, e);
                     set_and_emit_download_error(&app, &db_state.path, &id, &e);
                 }
             }
@@ -741,7 +741,7 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
                 };
 
                 if !torrent_manager.wait_until_ready(30000).await {
-                    eprintln!("Queue Processor: torrent engine still initializing; will retry {}", id);
+                    tracing::error!("Queue Processor: torrent engine still initializing; will retry {}", id);
                     let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Queued);
                     break;
                 }
@@ -762,13 +762,13 @@ pub async fn process_queue<R: Runtime>(app: AppHandle<R>) {
                     )
                     .await
                 {
-                    eprintln!("Failed to start queued torrent {}: {}", id, e);
+                    tracing::error!("Failed to start queued torrent {}: {}", id, e);
                     set_and_emit_download_error(&app, &db_state.path, &id, &e);
                 }
             }
             DownloadProtocol::Video => {
                 // TODO: Implement video download queuing when video support is fully added
-                eprintln!("Video queuing not yet supported for {}", id);
+                tracing::error!("Video queuing not yet supported for {}", id);
                 let _ = db::update_download_status(&db_state.path, &id, DownloadStatus::Error);
             }
         }

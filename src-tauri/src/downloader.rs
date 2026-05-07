@@ -1,206 +1,16 @@
 use futures::StreamExt;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Arc;
 use sha2::{Sha256, Digest};
 use std::fs::File;
 use std::io::Read;
-use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::io::{AsyncWriteExt, AsyncSeekExt, BufWriter};
-use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// A shared token-bucket rate limiter to coordinate multiple download workers.
-/// 
-/// This is based on the logic used by high-performance download managers like IDM/FDM.
-/// Instead of each worker throttling itself, they consume from a central pool.
-/// This ensures the aggregate speed stays exactly at the limit without causing 
-/// bursty traffic that could trigger server-side TCP resets or "Slow Consumer" errors.
-pub struct SharedRateLimiter {
-    limit: u64, // bytes per second
-    tokens: AtomicU64,
-    last_update: std::sync::Mutex<std::time::Instant>,
-}
-
-impl SharedRateLimiter {
-    pub fn new(limit: u64) -> Self {
-        Self {
-            limit,
-            tokens: AtomicU64::new(limit), // Start with a full bucket (1s burst)
-            last_update: std::sync::Mutex::new(std::time::Instant::now()),
-        }
-    }
-
-    /// Consumes tokens from the bucket. If not enough tokens are available, it sleeps.
-    /// 
-    /// To keep the stream "hot" and responsive, we process acquisitions in small increments.
-    /// This also prevents deadlocks where a single received chunk is larger than the 1s burst cap.
-    pub async fn acquire(&self, amount: u64, cancel_signal: &Option<Arc<AtomicBool>>) {
-        if self.limit == 0 { return; }
-
-        let mut remaining = amount;
-        while remaining > 0 {
-            if let Some(sig) = cancel_signal {
-                if sig.load(Ordering::Relaxed) { return; }
-            }
-
-            // 1. Refill tokens based on elapsed time
-            {
-                let mut last_update = self.last_update.lock().unwrap();
-                let now = std::time::Instant::now();
-                let elapsed = now.duration_since(*last_update).as_secs_f64();
-                
-                // Refill every 10ms for even higher frequency pacing
-                if elapsed >= 0.01 {
-                    let refill = (self.limit as f64 * elapsed) as u64;
-                    if refill > 0 {
-                        let current = self.tokens.load(Ordering::Relaxed);
-                        // Cap at 1s worth of tokens to prevent huge bursts after pauses
-                        let new_tokens = (current + refill).min(self.limit);
-                        self.tokens.store(new_tokens, Ordering::Relaxed);
-                        *last_update = now;
-                    }
-                }
-            }
-
-            // 2. Try to consume what we can
-            let current = self.tokens.load(Ordering::Relaxed);
-            if current > 0 {
-                let take = remaining.min(current);
-                if self.tokens.compare_exchange(current, current - take, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                    remaining -= take;
-                    if remaining == 0 { break; }
-                }
-            }
-
-            // 3. Not enough tokens, wait a tiny bit
-            if remaining > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-    }
-}
-#[derive(Error, Debug, Clone, Serialize)]
-pub enum DownloadError {
-    /// Failure during network request or response streaming.
-    #[error("Network error: {0}")]
-    Network(String),
-
-    /// Failure while writing data to the local disk.
-    #[error("IO error: {0}")]
-    Io(String),
-
-    /// The remote server does not support the HTTP `Range` header, 
-    /// making multi-threaded or resumed downloads impossible.
-    #[error("Server does not support range requests")]
-    NoRangeSupport,
-
-    /// The transfer was stopped by the user or the system.
-    #[error("Download cancelled")]
-    Cancelled,
-
-    /// The provided string could not be parsed as a valid URL.
-    #[error("Invalid URL: {0}")]
-    InvalidUrl(String),
-}
-
-impl From<reqwest::Error> for DownloadError {
-    fn from(err: reqwest::Error) -> Self {
-        DownloadError::Network(err.to_string())
-    }
-}
-
-impl From<std::io::Error> for DownloadError {
-    fn from(err: std::io::Error) -> Self {
-        DownloadError::Io(err.to_string())
-    }
-}
-
-/// Immutable configuration for an HTTP download session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadConfig {
-    /// Internal Ciel UUID.
-    pub id: String, 
-    /// Source web URL.
-    pub url: String,
-    /// Absolute target path on disk.
-    pub filepath: PathBuf,
-    /// Maximum number of concurrent TCP connections.
-    pub connections: u8,
-    /// Size of each work unit in bytes.
-    pub chunk_size: u64,
-    /// Throttling limit (bytes/sec).
-    pub speed_limit: u64,
-    /// Custom User-Agent string.
-    pub user_agent: Option<String>,
-    /// Optional cookies for authenticated sessions.
-    pub cookies: Option<String>,
-    /// Force multi-connection even if server doesn't advertise range support.
-    pub force_multi: bool,
-    /// Optional known total size (bytes) from URL validation.
-    pub size_hint: Option<u64>,
-}
-
-impl Default for DownloadConfig {
-    fn default() -> Self {
-        Self {
-            id: "default".to_string(),
-            url: "".to_string(),
-            filepath: PathBuf::new(),
-            connections: 8,
-            chunk_size: 5 * 1024 * 1024, // 5 MB
-            speed_limit: 0,
-            user_agent: None,
-            cookies: None,
-            force_multi: false,
-            size_hint: None,
-        }
-    }
-}
-
-/// Snapshot of the current transfer state, emitted to the frontend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadProgress {
-    pub id: String,
-    pub total: u64,
-    pub downloaded: u64,
-    /// Bytes per second (instantanous).
-    pub speed: u64,
-    /// Calculated seconds remaining based on current speed.
-    pub eta: u64,
-    pub connections: u8,
-    pub speed_limit: u64,
-    /// Detailed status message (e.g., "Initializing...", "Connecting...", "Fetching Metadata").
-    pub status_text: Option<String>,
-    /// Machine-readable phase key for UI/telemetry.
-    pub status_phase: Option<String>,
-    /// Seconds elapsed in the current phase.
-    pub phase_elapsed_secs: Option<u64>,
-    /// Discovered filename (emitted if it differs from the initial generic one).
-    pub filename: Option<String>,
-}
-
-/// Persistence model for a single byte-range segment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkRecord {
-    pub download_id: String,
-    pub start: i64,
-    pub end: i64,
-    pub downloaded: i64,
-}
-
-/// A discrete unit of work for a single worker thread.
-#[derive(Debug, Clone, Copy)]
-struct WorkChunk {
-    /// Byte offset where the chunk starts.
-    start: u64,
-    /// Byte offset where the chunk ends.
-    end: u64,
-    /// Number of bytes already successfully transferred in this chunk.
-    downloaded: u64,
-    _index: usize,
-}
+mod types;
+pub use types::{ChunkRecord, DownloadConfig, DownloadError, DownloadProgress};
+use types::{SharedRateLimiter, WorkChunk};
 
 /// A sophisticated, multi-threaded HTTP download engine.
 /// 
@@ -377,13 +187,13 @@ impl Downloader {
         // 2. Discover metadata and verify segmented download support.
         let (supports_range, total_size, filename_opt) = if self.config.force_multi {
             if let Some(size) = self.config.size_hint {
-                println!(
+                tracing::info!(
                     "[{}] Skipping range probe (force_multi_http enabled). size_hint={}",
                     self.config.id, size
                 );
                 (true, size, None)
             } else {
-                println!(
+                tracing::info!(
                     "[{}] force_multi_http enabled but size unknown; falling back to single connection.",
                     self.config.id
                 );
@@ -411,7 +221,7 @@ impl Downloader {
 
         if !supports_range || total_size == 0 {
             if self.config.force_multi {
-                eprintln!(
+                tracing::error!(
                     "[{}] Range not confirmed or size unknown; falling back to single connection to avoid corruption.",
                     self.config.id
                 );
@@ -541,7 +351,7 @@ impl Downloader {
             current_target_workers = current_target_workers.min(calculated_max.max(1));
             
             if current_target_workers < max_workers {
-                println!("[{}] Speed limit is low ({} bytes/s). Scaling down to {} workers for stability.", 
+                tracing::info!("[{}] Speed limit is low ({} bytes/s). Scaling down to {} workers for stability.", 
                     self.config.id, self.config.speed_limit, current_target_workers);
             }
         }
@@ -558,14 +368,14 @@ impl Downloader {
             if let Some(err) = worker_error {
                 if matches!(err, DownloadError::NoRangeSupport) {
                     abort_workers.store(true, Ordering::Relaxed);
-                    println!(
+                    tracing::info!(
                         "[{}] Falling back to single connection after range rejection.",
                         self.config.id
                     );
                     return self
                         .fallback_to_single_connection(
                             on_progress_arc.clone(),
-                            "Server rejected parallel download. Switching to single...",
+                            "Server does not support resume. Switching to single connection...",
                         )
                         .await;
                 }
@@ -577,14 +387,14 @@ impl Downloader {
                 let downloaded = self.downloaded_atomic.load(Ordering::Relaxed);
                 if downloaded == 0 && failures >= max_workers as usize && multi_start.elapsed().as_secs() >= 3 {
                     abort_workers.store(true, Ordering::Relaxed);
-                    println!(
+                    tracing::info!(
                         "[{}] Falling back to single connection after repeated worker failures.",
                         self.config.id
                     );
                     return self
                         .fallback_to_single_connection(
                             on_progress_arc.clone(),
-                            "Parallel download failed. Switching to single...",
+                            "Parallel download was unstable. Switching to single connection...",
                         )
                         .await;
                 }
@@ -642,14 +452,14 @@ impl Downloader {
                             }
                         }
                         if attempts >= max_retries { 
-                            eprintln!("[{}] Worker reached max retries ({}) for chunk {}-{}", id_clone, max_retries, chunk.start, chunk.end);
+                            tracing::error!("[{}] Worker reached max retries ({}) for chunk {}-{}", id_clone, max_retries, chunk.start, chunk.end);
                             break; 
                         }
 
                         if attempts > 0 {
                             let backoff = 2u64.pow(attempts as u32 - 1) * 1000;
                             let backoff = backoff.min(30000); // capped at 30s
-                            println!("[{}] Retry #{} for chunk {}-{}. Sleeping {}ms", id_clone, attempts, chunk.start, chunk.end, backoff);
+                            tracing::info!("[{}] Retry #{} for chunk {}-{}. Sleeping {}ms", id_clone, attempts, chunk.start, chunk.end, backoff);
                             
                             // Responsive sleep: check for cancellation signal during backoff
                             let sleep = tokio::time::sleep(std::time::Duration::from_millis(backoff));
@@ -720,7 +530,7 @@ impl Downloader {
                                         .get(reqwest::header::CONTENT_TYPE)
                                         .and_then(|v| v.to_str().ok())
                                         .unwrap_or("-");
-                                    eprintln!(
+                                    tracing::error!(
                                         "[{}] Range rejected: status={} range='{}' content-range='{}' accept-ranges='{}' content-length='{}' content-type='{}'",
                                         id_clone,
                                         status,
@@ -770,7 +580,7 @@ impl Downloader {
                                 };
 
                                 let bytes = item.map_err(|e| {
-                                    eprintln!("[{}] Stream error (ContentType: {}) on chunk {}-{}: {}", id_clone, content_type, chunk.start, chunk.end, e);
+                                    tracing::error!("[{}] Stream error (ContentType: {}) on chunk {}-{}: {}", id_clone, content_type, chunk.start, chunk.end, e);
                                     DownloadError::Network(e.to_string())
                                 })?;
                                 chunk_file.write_all(&bytes).await?;
@@ -832,7 +642,7 @@ impl Downloader {
                                     abort_signal.store(true, Ordering::Relaxed);
                                     let mut shared_error = error_ptr.lock().unwrap();
                                     if shared_error.is_none() {
-                                        eprintln!(
+                                        tracing::error!(
                                             "[{}] Worker error on chunk {}-{}: {}",
                                             id_clone, chunk.start, chunk.end, e
                                         );
@@ -841,7 +651,7 @@ impl Downloader {
                                     final_error = Some(e);
                                     break;
                                 }
-                                eprintln!("[{}] Worker error on chunk {}-{}: {}", id_clone, chunk.start, chunk.end, e);
+                                tracing::error!("[{}] Worker error on chunk {}-{}: {}", id_clone, chunk.start, chunk.end, e);
                                 failure_counter.fetch_add(1, Ordering::Relaxed);
                                 if let Some(sig) = &cancel_signal {
                                     if sig.load(Ordering::Relaxed) { break; }
@@ -850,7 +660,7 @@ impl Downloader {
                                 attempts += 1;
                                 
                                 let retry_delay = 1000 * attempts as u64;
-                                println!("[{}] Error cooldown: retrying after {}ms...", id_clone, retry_delay);
+                                tracing::info!("[{}] Error cooldown: retrying after {}ms...", id_clone, retry_delay);
                                 
                                 // Responsive sleep for the outer retry loop
                                 let sleep = tokio::time::sleep(std::time::Duration::from_millis(retry_delay));

@@ -104,10 +104,10 @@ impl TorrentManager {
                 Ok(s) => {
                     let mut sess = session_clone.lock().await;
                     *sess = Some(s);
-                    println!("[Torrent] Engine initialized successfully in background.");
+                    tracing::info!("[Torrent] Engine initialized successfully in background.");
                 }
                 Err(e) => {
-                    eprintln!(
+                    tracing::error!(
                         "Failed to start torrent session in background: {}. Torrents will be disabled.",
                         e
                     );

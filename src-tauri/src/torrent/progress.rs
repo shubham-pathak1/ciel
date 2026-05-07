@@ -1,5 +1,6 @@
 
 use super::files;
+use super::telemetry;
 use super::TorrentManager;
 use std::collections::HashSet;
 use std::path::Path;
@@ -35,7 +36,7 @@ impl TorrentManager {
             Some(initial_peers.clone())
         };
         if let Some(peers) = initial_peers_opt.as_ref() {
-            println!(
+            tracing::info!(
                 "[Torrent] {}: seeding {} initial peer(s) from magnet x.pe",
                 id,
                 peers.len()
@@ -94,7 +95,7 @@ impl TorrentManager {
                     && !msg.contains("already running")
                     && !msg.contains("already live")
                 {
-                    eprintln!("[Torrent] Resume unpause failed for {}: {}", id, msg);
+                    tracing::error!("[Torrent] Resume unpause failed for {}: {}", id, msg);
                 }
             }
         }
@@ -345,7 +346,7 @@ impl TorrentManager {
                         let id_p = id_clone.clone();
                         let info_hash_hex = hex::encode(handle.info_hash().0);
 
-                        println!(
+                        tracing::info!(
                             "[Torrent][Meta][{}] total_bytes={} files={} selected_files={} info_hash={}",
                             id_clone,
                             total_size,
@@ -399,17 +400,16 @@ impl TorrentManager {
                         && startup_first_network_at.is_none()
                         && startup_elapsed >= std::time::Duration::from_secs(45)
                     {
-                        let detail = format!(
-                            "resume={}, reason=timeout_no_first_byte, elapsed_ms={}, metadata_ms={}, live_ms={}, peers_ms={}, first_network_ms={}, initial_peers={}",
+                        let detail = telemetry::startup_slow_detail(
                             is_resume,
-                            startup_elapsed.as_millis(),
-                            startup_metadata_at.map(|d| d.as_millis()).unwrap_or(0),
-                            startup_live_at.map(|d| d.as_millis()).unwrap_or(0),
-                            startup_peers_at.map(|d| d.as_millis()).unwrap_or(0),
-                            startup_first_network_at.map(|d| d.as_millis()).unwrap_or(0),
+                            startup_elapsed,
+                            startup_metadata_at,
+                            startup_live_at,
+                            startup_peers_at,
+                            startup_first_network_at,
                             initial_peers_count,
                         );
-                        println!("[Torrent][Startup][{}] {}", id_clone, detail);
+                        tracing::info!("[Torrent][Startup][{}] {}", id_clone, detail);
                         let db_p = db_path_clone.clone();
                         let id_p = id_clone.clone();
                         tokio::task::spawn_blocking(move || {
@@ -425,21 +425,16 @@ impl TorrentManager {
 
                     if !startup_first_byte_logged {
                         if let Some(first_byte_at) = startup_first_byte_at {
-                            let first_verified_lag_ms = startup_first_network_at
-                                .map(|d| first_byte_at.saturating_sub(d).as_millis())
-                                .unwrap_or(0);
-                            let detail = format!(
-                                "resume={}, reason=first_byte, first_byte_ms={}, first_network_ms={}, first_verified_lag_ms={}, metadata_ms={}, live_ms={}, peers_ms={}, initial_peers={}",
+                            let detail = telemetry::startup_first_byte_detail(
                                 is_resume,
-                                first_byte_at.as_millis(),
-                                startup_first_network_at.map(|d| d.as_millis()).unwrap_or(0),
-                                first_verified_lag_ms,
-                                startup_metadata_at.map(|d| d.as_millis()).unwrap_or(0),
-                                startup_live_at.map(|d| d.as_millis()).unwrap_or(0),
-                                startup_peers_at.map(|d| d.as_millis()).unwrap_or(0),
+                                first_byte_at,
+                                startup_first_network_at,
+                                startup_metadata_at,
+                                startup_live_at,
+                                startup_peers_at,
                                 initial_peers_count,
                             );
-                            println!("[Torrent][Startup][{}] {}", id_clone, detail);
+                            tracing::info!("[Torrent][Startup][{}] {}", id_clone, detail);
                             let db_p = db_path_clone.clone();
                             let id_p = id_clone.clone();
                             tokio::task::spawn_blocking(move || {
@@ -483,7 +478,7 @@ impl TorrentManager {
                                         && !msg.contains("already running")
                                         && !msg.contains("already live")
                                     {
-                                        eprintln!(
+                                        tracing::error!(
                                             "[Torrent] Recovery unpause failed for {}: {}",
                                             id_clone, msg
                                         );
@@ -589,7 +584,7 @@ impl TorrentManager {
                             }
                         };
                     if phase_key != phase_next {
-                        println!(
+                        tracing::info!(
                             "[Torrent][Phase][{}] {} -> {} at {}ms peers={} speed={}Bps rx={} verified={}",
                             id_clone,
                             phase_key,
@@ -653,7 +648,7 @@ impl TorrentManager {
                     let total_bytes_final = stats.total_bytes; // Capture explicit current size
                     let _ = tokio::task::spawn_blocking(move || {
                         if let Err(e) = crate::db::mark_download_completed(&db_p, &id_p) {
-                            eprintln!("CRITICAL DB ERROR: Failed to mark as completed: {}", e);
+                            tracing::error!("CRITICAL DB ERROR: Failed to mark as completed: {}", e);
                         }
 
                         // Also ensure progress is capped at 100%
@@ -683,7 +678,7 @@ impl TorrentManager {
                         .delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), false)
                         .await
                     {
-                        eprintln!(
+                        tracing::error!(
                             "[Torrent] Failed to remove completed torrent {} from session: {}",
                             id_clone, e
                         );

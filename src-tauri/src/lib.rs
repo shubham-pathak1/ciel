@@ -68,7 +68,7 @@ pub fn run() {
             app.manage(CrashMarkerState {
                 path: crash_marker_path,
             });
-            println!(
+            tracing::info!(
                 "[Startup] crash_marker_present={}, fastresume={}",
                 had_unclean,
                 !had_unclean
@@ -148,7 +148,6 @@ pub fn run() {
             commands::http::add_download,
             commands::torrent::add_torrent,
             commands::torrent::analyze_torrent,
-            commands::torrent::run_torrent_diagnostics,
             commands::http::validate_url_type,
             commands::torrent::start_selective_torrent,
             commands::pause_download,
