@@ -233,7 +233,6 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('cookie_browser', 'none'),
             ('ask_location', 'false'),
             ('auto_organize', 'false'),
-            ('torrent_debug_stats', 'false'),
             ('force_multi_http', 'false');
         "
     )?;

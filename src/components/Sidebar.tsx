@@ -81,7 +81,7 @@ export function Sidebar({ currentView, onViewChange }: SidebarProps) {
                 <button
                     onClick={() => onViewChange(item.id)}
                     aria-label={item.label}
-                    title={item.label}
+                    aria-current={isActive ? "page" : undefined}
                     className={clsx(
                         "relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200",
                         isActive
@@ -99,7 +99,8 @@ export function Sidebar({ currentView, onViewChange }: SidebarProps) {
                     <Icon size={19} className={clsx("relative z-10", isActive ? "text-text-primary" : "text-text-tertiary")} />
                 </button>
 
-                <div className="pointer-events-none absolute left-[calc(100%+12px)] top-1/2 z-30 -translate-y-1/2 rounded-lg border border-surface-border bg-brand-secondary px-2.5 py-1.5 text-xs font-medium text-text-primary opacity-0 shadow-xl transition-all duration-150 group-hover:opacity-100 whitespace-nowrap">
+                <div className="pointer-events-none absolute left-[calc(100%+8px)] top-1/2 z-50 -translate-y-1/2 translate-x-0.5 rounded-lg border border-surface-border bg-black/90 px-2.5 py-1.5 text-[11px] font-semibold tracking-wide text-text-primary opacity-0 shadow-2xl backdrop-blur-md transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100 whitespace-nowrap">
+                    <div className="absolute left-[-5px] top-1/2 h-2.5 w-2.5 -translate-y-1/2 rotate-45 border-b border-l border-surface-border bg-black/90" />
                     {item.label}
                 </div>
             </li>

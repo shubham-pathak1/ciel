@@ -31,9 +31,6 @@ export function Settings() {
     const [isSaving, setIsSaving] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
     const [hasActiveDownloads, setHasActiveDownloads] = useState(false);
-    const [diagnosticUrl, setDiagnosticUrl] = useState("");
-    const [diagnosticRunning, setDiagnosticRunning] = useState(false);
-    const [diagnosticStatus, setDiagnosticStatus] = useState<string | null>(null);
     const { checkForUpdates, checking } = useUpdater();
 
     useEffect(() => {
@@ -72,28 +69,6 @@ export function Settings() {
 
     const handleChange = (key: keyof SettingsState, value: string | boolean) => {
         setLocalSettings(prev => ({ ...prev, [key]: value }));
-    };
-
-    const runTorrentDiagnostics = async () => {
-        const trimmed = diagnosticUrl.trim();
-        if (!trimmed) {
-            setDiagnosticStatus("Paste a magnet or .torrent URL first.");
-            return;
-        }
-        setDiagnosticRunning(true);
-        setDiagnosticStatus(null);
-        try {
-            const result = await invoke<string>("run_torrent_diagnostics", {
-                url: trimmed,
-                outputFolder: localSettings.download_path || null,
-            });
-            setDiagnosticStatus(result || "Diagnostics started. Check terminal logs.");
-        } catch (err) {
-            console.error("Failed to run diagnostics:", err);
-            setDiagnosticStatus("Diagnostics failed. Check terminal logs for details.");
-        } finally {
-            setDiagnosticRunning(false);
-        }
     };
 
     const handleBrowse = async () => {
@@ -361,50 +336,6 @@ export function Settings() {
                             />
                         </SettingItem>
 
-                        <SettingItem
-                            label="Torrent Debug Stats"
-                            description="Show RX vs Verified stats and extra startup diagnostics in the UI."
-                        >
-                            <SettingToggle
-                                enabled={localSettings.torrent_debug_stats}
-                                onToggle={() => handleChange("torrent_debug_stats", !localSettings.torrent_debug_stats)}
-                            />
-                        </SettingItem>
-
-                        <div className="space-y-3 rounded-lg border border-brand-tertiary/30 bg-brand-secondary/30 p-4">
-                            <div className="flex items-center justify-between">
-                                <div className="flex flex-col gap-0.5">
-                                    <span className="text-sm font-medium text-text-primary tracking-tight">Torrent Diagnostics</span>
-                                    <span className="text-xs text-text-tertiary">Runs an automated start + pause/resume test and logs timings in the terminal.</span>
-                                </div>
-                            </div>
-                            <div className="flex gap-3">
-                                <input
-                                    type="text"
-                                    value={diagnosticUrl}
-                                    onChange={(e) => setDiagnosticUrl(e.target.value)}
-                                    placeholder="Paste magnet or .torrent URL"
-                                    className="flex-1 bg-brand-primary border border-surface-border rounded-lg px-4 py-3 text-xs text-text-primary focus:outline-none focus:border-text-secondary transition-all font-mono"
-                                />
-                                <button
-                                    onClick={runTorrentDiagnostics}
-                                    disabled={diagnosticRunning}
-                                    className={clsx(
-                                        "px-5 py-3 rounded-lg text-xs font-semibold border transition-colors",
-                                        diagnosticRunning
-                                            ? "bg-brand-tertiary text-text-tertiary border-surface-border cursor-not-allowed"
-                                            : "bg-white text-black border-white hover:bg-neutral-200"
-                                    )}
-                                >
-                                    {diagnosticRunning ? "Running..." : "Run Test"}
-                                </button>
-                            </div>
-                            {diagnosticStatus && (
-                                <div className="text-[11px] text-text-tertiary font-medium">
-                                    {diagnosticStatus}
-                                </div>
-                            )}
-                        </div>
                     </div>
                 );
             case "automation":
