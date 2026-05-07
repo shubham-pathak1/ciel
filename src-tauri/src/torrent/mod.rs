@@ -1,5 +1,6 @@
 mod files;
 mod manager;
+mod phases;
 mod progress;
 mod telemetry;
 mod types;

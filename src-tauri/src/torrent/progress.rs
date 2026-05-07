@@ -1,5 +1,5 @@
-
 use super::files;
+use super::phases::{PhaseInput, PhaseState};
 use super::telemetry;
 use super::TorrentManager;
 use std::collections::HashSet;
@@ -64,7 +64,10 @@ impl TorrentManager {
                     ..Default::default()
                 };
                 session
-                    .add_torrent(librqbit::AddTorrent::from_bytes(torrent_bytes), Some(options))
+                    .add_torrent(
+                        librqbit::AddTorrent::from_bytes(torrent_bytes),
+                        Some(options),
+                    )
                     .await
             }
             None => {
@@ -82,7 +85,9 @@ impl TorrentManager {
         }
         .map_err(|e| e.to_string())?;
 
-        let handle = response.into_handle().ok_or("Failed to get torrent handle")?;
+        let handle = response
+            .into_handle()
+            .ok_or("Failed to get torrent handle")?;
 
         if start_paused {
             let _ = session.pause(&handle).await;
@@ -136,9 +141,7 @@ impl TorrentManager {
             let mut speed_u64 = 0u64;
             let mut verified_speed_u64 = 0u64;
             let mut smoothed_speed = 0.0f64;
-            let mut paused_counter = 0u8; // Tracks transitions between non-live/live states
-            let mut last_resume_time = std::time::Instant::now();
-            let mut was_live = false;
+            let mut phase_state = PhaseState::new(is_resume);
             let completion_handled = false;
             let mut stalled_since: Option<std::time::Instant> = None;
             let mut live_stalled_since: Option<std::time::Instant> = None;
@@ -146,12 +149,6 @@ impl TorrentManager {
             let mut last_progress_seen = handle.stats().progress_bytes;
             let mut last_db_flush = std::time::Instant::now();
             let mut last_db_bytes = handle.stats().progress_bytes;
-            let mut phase_key = if is_resume {
-                "restoring_session".to_string()
-            } else {
-                "initializing".to_string()
-            };
-            let mut phase_started_at = std::time::Instant::now();
             let startup_started_at = std::time::Instant::now();
             let startup_baseline_bytes = if is_resume {
                 known_downloaded_baseline
@@ -201,7 +198,7 @@ impl TorrentManager {
                     "eta": 0,
                     "connections": connections,
                     "status_text": Some(if is_resume { "Resuming..." } else { "Initializing..." }),
-                    "status_phase": phase_key,
+                    "status_phase": phase_state.current_phase(),
                     "phase_elapsed_secs": 0u64,
                 }),
             );
@@ -250,9 +247,8 @@ impl TorrentManager {
                 {
                     startup_first_byte_at = Some(startup_elapsed);
                 }
-                let is_restore_verifying = is_resume
-                    && stats.live.is_none()
-                    && downloaded_now > startup_baseline_bytes;
+                let is_restore_verifying =
+                    is_resume && stats.live.is_none() && downloaded_now > startup_baseline_bytes;
                 let display_downloaded = if is_restore_verifying {
                     startup_baseline_bytes
                 } else {
@@ -290,14 +286,14 @@ impl TorrentManager {
 
                     // Keep an additional startup spike guard around quick resume transitions.
                     if connections == 0
-                        && last_resume_time.elapsed().as_secs() < 10
+                        && phase_state.last_resume_time().elapsed().as_secs() < 10
                         && current_speed > 5_000_000.0
                     {
                         current_speed = 0.0;
                     }
 
                     // Faster alpha (0.7) for first 5 seconds after resume to ramp up, then 0.3 for stability
-                    let alpha = if last_resume_time.elapsed().as_secs() < 5 {
+                    let alpha = if phase_state.last_resume_time().elapsed().as_secs() < 5 {
                         0.7
                     } else {
                         0.3
@@ -330,7 +326,8 @@ impl TorrentManager {
                 // NOTE: We do NOT update filename/filepath here - they are already set correctly
                 // by commands.rs with unique paths like "Movie (1).mkv"
                 if !name_updated && stats.total_bytes > 0 {
-                    let meta_result = handle.with_metadata(|m| (m.name.clone(), m.file_infos.len()));
+                    let meta_result =
+                        handle.with_metadata(|m| (m.name.clone(), m.file_infos.len()));
                     if let Ok((_real_name, file_count)) = meta_result {
                         let total_size = stats.total_bytes;
 
@@ -468,7 +465,9 @@ impl TorrentManager {
                         if let Some(stalled_at) = stalled_since {
                             let stalled_for = now.duration_since(stalled_at);
                             let can_poke = last_recovery_poke
-                                .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(12))
+                                .map(|t| {
+                                    now.duration_since(t) >= std::time::Duration::from_secs(12)
+                                })
                                 .unwrap_or(true);
 
                             if stalled_for >= std::time::Duration::from_secs(20) && can_poke {
@@ -480,7 +479,8 @@ impl TorrentManager {
                                     {
                                         tracing::error!(
                                             "[Torrent] Recovery unpause failed for {}: {}",
-                                            id_clone, msg
+                                            id_clone,
+                                            msg
                                         );
                                     }
                                 }
@@ -491,114 +491,38 @@ impl TorrentManager {
                         last_recovery_poke = None;
                     }
 
-                    // Emit progress only if NOT finished, to prevent race with completion event
-                    let (status_text, phase_next): (Option<String>, &'static str) =
-                        if stats.total_bytes == 0 {
-                            (
-                                Some(format!("Fetching Metadata... ({} peers)", connections)),
-                                "fetching_metadata",
-                            )
-                        } else if is_cached_paused {
-                            paused_counter = 50;
-                            was_live = false;
-                            // Reset speed baselines while paused so resumption starts fresh
-                            last_downloaded = stats.progress_bytes;
-                            last_time = now;
-                            (Some("Paused".to_string()), "paused")
-                        } else if stats.live.is_none() {
-                            paused_counter = paused_counter.saturating_add(1);
+                    let phase_update = phase_state.evaluate(PhaseInput {
+                        now,
+                        total_bytes: stats.total_bytes,
+                        progress_bytes: stats.progress_bytes,
+                        has_live: stats.live.is_some(),
+                        connections,
+                        is_cached_paused,
+                        is_resume,
+                        speed_bps: speed_u64,
+                        startup_first_byte_seen: startup_first_byte_at.is_some(),
+                        stalled_since,
+                        live_stalled_since,
+                        startup_baseline_bytes,
+                    });
+                    if phase_update.reset_speed_baseline {
+                        last_downloaded = stats.progress_bytes;
+                        last_time = now;
+                    }
 
-                            // Reset speed baselines while non-live so resume starts fresh
-                            last_downloaded = stats.progress_bytes;
-                            last_time = now;
-
-                            if stats.total_bytes > 0
-                                && stats.progress_bytes > 0
-                                && stats.progress_bytes < stats.total_bytes
-                            {
-                                let stalled_for = stalled_since
-                                    .map(|t| now.duration_since(t))
-                                    .unwrap_or_default();
-
-                                if stalled_for >= std::time::Duration::from_secs(20) {
-                                    (Some("Finding peers...".to_string()), "finding_peers")
-                                } else {
-                                    let pct = (stats.progress_bytes as f64 / stats.total_bytes as f64)
-                                        * 100.0;
-                                    (
-                                        Some(format!(
-                                            "Verifying local data... {:.1}%",
-                                            pct.min(100.0)
-                                        )),
-                                        "verifying_data",
-                                    )
-                                }
-                            } else if stats.total_bytes > 0 && stats.progress_bytes >= stats.total_bytes {
-                                (Some("Finding peers...".to_string()), "finding_peers")
-                            } else if is_resume {
-                                (Some("Resuming...".to_string()), "restoring_session")
-                            } else {
-                                (Some("Initializing...".to_string()), "initializing")
-                            }
-                        } else {
-                            // Engine is live
-                            if paused_counter >= 1 || !was_live {
-                                // We just transitioned from paused to live
-                                last_resume_time = std::time::Instant::now();
-                            }
-                            paused_counter = 0; // Reset counter when live
-                            was_live = true;
-
-                            if speed_u64 == 0 {
-                                if connections == 0 {
-                                    (Some("Connecting...".to_string()), "connecting")
-                                } else {
-                                    let negotiating_for = live_stalled_since
-                                        .map(|t| now.duration_since(t))
-                                        .unwrap_or_default();
-                                    if negotiating_for >= std::time::Duration::from_secs(20) {
-                                        (
-                                            Some(format!(
-                                                "Negotiating peers... ({} peers, slow swarm)",
-                                                connections
-                                            )),
-                                            "negotiating_peers",
-                                        )
-                                    } else {
-                                        (
-                                            Some(format!("Negotiating peers... ({} peers)", connections)),
-                                            "negotiating_peers",
-                                        )
-                                    }
-                                }
-                            } else if startup_first_byte_at.is_none() {
-                                (
-                                    Some(format!(
-                                        "Receiving data (unverified, {} peers)",
-                                        connections
-                                    )),
-                                    "preparing_first_piece",
-                                )
-                            } else {
-                                (Some(format!("Downloading ({} peers)", connections)), "downloading")
-                            }
-                        };
-                    if phase_key != phase_next {
+                    if let Some(previous_phase) = phase_update.phase_changed_from.as_ref() {
                         tracing::info!(
                             "[Torrent][Phase][{}] {} -> {} at {}ms peers={} speed={}Bps rx={} verified={}",
                             id_clone,
-                            phase_key,
-                            phase_next,
+                            previous_phase,
+                            phase_update.phase_key,
                             startup_elapsed.as_millis(),
                             connections,
                             speed_u64,
                             network_received,
                             display_downloaded
                         );
-                        phase_key = phase_next.to_string();
-                        phase_started_at = now;
                     }
-                    let phase_elapsed_secs = now.duration_since(phase_started_at).as_secs();
 
                     let _ = app.emit(
                         "download-progress",
@@ -611,9 +535,9 @@ impl TorrentManager {
                             "speed": speed_u64,
                             "eta": eta,
                             "connections": connections,
-                            "status_text": status_text,
-                            "status_phase": phase_key,
-                            "phase_elapsed_secs": phase_elapsed_secs,
+                            "status_text": phase_update.status_text,
+                            "status_phase": phase_update.phase_key,
+                            "phase_elapsed_secs": phase_update.phase_elapsed_secs,
                         }),
                     );
                 }
@@ -623,9 +547,7 @@ impl TorrentManager {
                     && stats.total_bytes > 0
                     && stats.progress_bytes >= stats.total_bytes;
 
-                if (complete_by_stats || complete_by_bytes)
-                    && !completion_handled
-                {
+                if (complete_by_stats || complete_by_bytes) && !completion_handled {
                     let file_entries_for_cleanup = if selected_indices_for_cleanup.is_some() {
                         handle
                             .with_metadata(|m| {
@@ -648,7 +570,10 @@ impl TorrentManager {
                     let total_bytes_final = stats.total_bytes; // Capture explicit current size
                     let _ = tokio::task::spawn_blocking(move || {
                         if let Err(e) = crate::db::mark_download_completed(&db_p, &id_p) {
-                            tracing::error!("CRITICAL DB ERROR: Failed to mark as completed: {}", e);
+                            tracing::error!(
+                                "CRITICAL DB ERROR: Failed to mark as completed: {}",
+                                e
+                            );
                         }
 
                         // Also ensure progress is capped at 100%
@@ -680,7 +605,8 @@ impl TorrentManager {
                     {
                         tracing::error!(
                             "[Torrent] Failed to remove completed torrent {} from session: {}",
-                            id_clone, e
+                            id_clone,
+                            e
                         );
                     }
 
@@ -697,9 +623,8 @@ impl TorrentManager {
                             );
                             let selected: HashSet<usize> =
                                 selected_indices.iter().copied().collect();
-                            let has_remaining_unselected = file_entries
-                                .iter()
-                                .any(|(idx, relative_path)| {
+                            let has_remaining_unselected =
+                                file_entries.iter().any(|(idx, relative_path)| {
                                     if selected.contains(idx) {
                                         return false;
                                     }
@@ -719,8 +644,7 @@ impl TorrentManager {
                     // 5. Post-Download Actions
                     // We need the full Download record to know the filepath
                     if let Ok(downloads) = crate::db::get_all_downloads(&db_path_clone) {
-                        if let Some(download) = downloads.into_iter().find(|d| d.id == id_clone)
-                        {
+                        if let Some(download) = downloads.into_iter().find(|d| d.id == id_clone) {
                             crate::commands::execute_post_download_actions(
                                 app.clone(),
                                 db_path_clone.clone(),

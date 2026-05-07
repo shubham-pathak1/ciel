@@ -1,19 +1,20 @@
 use futures::StreamExt;
 use reqwest::Client;
-use std::sync::Arc;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
-use tokio::sync::mpsc;
-use tokio::io::{AsyncWriteExt, AsyncSeekExt, BufWriter};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::io::{AsyncWriteExt, BufWriter};
 
 mod types;
+mod workers;
 pub use types::{ChunkRecord, DownloadConfig, DownloadError, DownloadProgress};
 use types::{SharedRateLimiter, WorkChunk};
+use workers::{run_workers, SpeedState, WorkerOrchestrationConfig, WorkerOutcome};
 
 /// A sophisticated, multi-threaded HTTP download engine.
-/// 
+///
 /// It implements:
 /// - **Parallel TCP Connections**: Spawns multiple workers to saturate bandwidth.
 /// - **Resumable Transfers**: Uses SQLite to track chunk progress.
@@ -31,14 +32,11 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    async fn fallback_to_single_connection<F>(
+    async fn fallback_to_single_connection(
         &self,
-        on_progress: Arc<F>,
+        on_progress: Arc<dyn Fn(DownloadProgress) + Send + Sync + 'static>,
         reason: &str,
-    ) -> Result<(), DownloadError>
-    where
-        F: Fn(DownloadProgress) + Send + Sync + 'static,
-    {
+    ) -> Result<(), DownloadError> {
         if let Some(ref db) = self.db_path {
             crate::db::update_download_metadata(db, &self.config.id, Some("http_no_range")).ok();
             crate::db::delete_download_chunks(db, &self.config.id).ok();
@@ -61,7 +59,8 @@ impl Downloader {
         let snapshot = self.progress.lock().unwrap().clone();
         on_progress(snapshot);
 
-        self.download_single_connection(move |p| on_progress(p)).await
+        self.download_single_connection(move |p| on_progress(p))
+            .await
     }
 
     pub fn new(config: DownloadConfig) -> Self {
@@ -146,7 +145,9 @@ impl Downloader {
 
         loop {
             let count = file.read(&mut buffer)?;
-            if count == 0 { break; }
+            if count == 0 {
+                break;
+            }
             hasher.update(&buffer[..count]);
         }
 
@@ -156,7 +157,7 @@ impl Downloader {
     }
 
     /// The primary entry point for starting a download.
-    /// 
+    ///
     /// This method manages the entire transfer lifecycle:
     /// 1. Metadata discovery (Range support, Total size).
     /// 2. Chunk calculation and database synchronization.
@@ -167,7 +168,7 @@ impl Downloader {
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
         let url = self.config.url.clone();
-        
+
         // 1. Immediate architectural feedback: Starting initialization phase.
         on_progress({
             let mut p = self.progress.lock().unwrap().clone();
@@ -176,7 +177,6 @@ impl Downloader {
             p.phase_elapsed_secs = Some(0);
             p
         });
-        
 
         // Optimization 1: If user only requested 1 connection, skip the HEAD check and go straight to GET.
         // This avoids one round-trip and significantly speeds up "rust-style" performance.
@@ -189,7 +189,8 @@ impl Downloader {
             if let Some(size) = self.config.size_hint {
                 tracing::info!(
                     "[{}] Skipping range probe (force_multi_http enabled). size_hint={}",
-                    self.config.id, size
+                    self.config.id,
+                    size
                 );
                 (true, size, None)
             } else {
@@ -241,12 +242,16 @@ impl Downloader {
         if let Some(ref db_path) = self.db_path {
             if let Ok(db_chunks) = crate::db::get_download_chunks(db_path, &self.config.id) {
                 if !db_chunks.is_empty() {
-                    chunks = db_chunks.into_iter().enumerate().map(|(i, c)| WorkChunk {
-                        start: c.start as u64,
-                        end: c.end as u64,
-                        downloaded: c.downloaded as u64,
-                        _index: i,
-                    }).collect();
+                    chunks = db_chunks
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, c)| WorkChunk {
+                            start: c.start as u64,
+                            end: c.end as u64,
+                            downloaded: c.downloaded as u64,
+                            _index: i,
+                        })
+                        .collect();
                 }
             }
         }
@@ -314,34 +319,22 @@ impl Downloader {
         }
 
         let total_downloaded = chunks.iter().map(|c| c.downloaded).sum();
-        self.downloaded_atomic.store(total_downloaded, Ordering::SeqCst);
+        self.downloaded_atomic
+            .store(total_downloaded, Ordering::SeqCst);
         {
             let mut p = self.progress.lock().unwrap();
             p.downloaded = total_downloaded;
         }
 
-        
-        struct SpeedState {
-            last_time: std::time::Instant,
-            last_bytes: u64,
-        }
         let speed_state = Arc::new(std::sync::Mutex::new(SpeedState {
             last_time: std::time::Instant::now(),
             last_bytes: total_downloaded,
         }));
-        
-        let on_progress_arc = Arc::new(on_progress);
-        let error_occurred = Arc::new(std::sync::Mutex::new(None));
-        let abort_workers = Arc::new(AtomicBool::new(false));
-        let throttled = Arc::new(std::sync::Mutex::new(false));
-        let failure_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let range_diag_logged = Arc::new(AtomicBool::new(false));
-        let multi_start = std::time::Instant::now();
 
-        // State for direct access
-        let pending_chunks = Arc::new(std::sync::Mutex::new(chunks.into_iter().filter(|c| c.downloaded < (c.end - c.start + 1)).collect::<Vec<_>>()));
-        let active_workers = Arc::new(std::sync::Mutex::new(0u8));
+        let on_progress_arc: Arc<dyn Fn(DownloadProgress) + Send + Sync + 'static> =
+            Arc::new(on_progress);
         let max_workers = self.config.connections;
+
         // Start with full power immediately, but cap workers if speed limit is too low
         // Rule: Each connection should ideally have ~256 KB/s to prevent "Slow Consumer" resets
         let mut current_target_workers = max_workers;
@@ -349,375 +342,44 @@ impl Downloader {
             let min_speed_per_worker = 512 * 1024; // 512 KB/s
             let calculated_max = (self.config.speed_limit / min_speed_per_worker) as u8;
             current_target_workers = current_target_workers.min(calculated_max.max(1));
-            
+
             if current_target_workers < max_workers {
                 tracing::info!("[{}] Speed limit is low ({} bytes/s). Scaling down to {} workers for stability.", 
                     self.config.id, self.config.speed_limit, current_target_workers);
             }
         }
-        
-        // Channel to signal worker completion or scaling
-        let (worker_tx, mut worker_rx) = mpsc::channel::<()>(32);
-        let mut last_global_db_update = std::time::Instant::now();
-        let start_emit_time = std::time::Instant::now();
 
-        loop {
-            // Check for errors from workers. Keep the lock guard scoped to avoid
-            // holding a non-Send MutexGuard across async await points.
-            let worker_error = { error_occurred.lock().unwrap().clone() };
-            if let Some(err) = worker_error {
-                if matches!(err, DownloadError::NoRangeSupport) {
-                    abort_workers.store(true, Ordering::Relaxed);
-                    tracing::info!(
-                        "[{}] Falling back to single connection after range rejection.",
-                        self.config.id
-                    );
-                    return self
-                        .fallback_to_single_connection(
-                            on_progress_arc.clone(),
-                            "Server does not support resume. Switching to single connection...",
-                        )
-                        .await;
-                }
-                return Err(err);
-            }
-
-            if self.config.force_multi {
-                let failures = failure_count.load(Ordering::Relaxed);
-                let downloaded = self.downloaded_atomic.load(Ordering::Relaxed);
-                if downloaded == 0 && failures >= max_workers as usize && multi_start.elapsed().as_secs() >= 3 {
-                    abort_workers.store(true, Ordering::Relaxed);
-                    tracing::info!(
-                        "[{}] Falling back to single connection after repeated worker failures.",
-                        self.config.id
-                    );
-                    return self
-                        .fallback_to_single_connection(
-                            on_progress_arc.clone(),
-                            "Parallel download was unstable. Switching to single connection...",
-                        )
-                        .await;
-                }
-            }
-
-            // Spawn workers up to current target
-            let mut current_active = *active_workers.lock().unwrap();
-            while current_active < current_target_workers {
-                let pending = pending_chunks.clone();
-                let chunk = {
-                    let mut p = pending.lock().unwrap();
-                    if p.is_empty() { break; }
-                    p.remove(0)
-                };
-
-                let active_ptr = active_workers.clone();
-                let progress = self.progress.clone();
-                let downloaded_atomic = self.downloaded_atomic.clone();
-                let on_progress_cb = on_progress_arc.clone();
-                let db_path_clone = self.db_path.clone();
-                let id_clone = self.config.id.clone();
-                let client = self.client.clone();
-                let url = url.clone();
-                let filepath = self.config.filepath.clone();
-                let tx = worker_tx.clone();
-                let error_ptr = error_occurred.clone();
-                let throttled_ptr = throttled.clone();
-                let cancel_signal = self.cancel_signal.clone();
-                let abort_signal = abort_workers.clone();
-                let failure_counter = failure_count.clone();
-                let range_diag_logged = range_diag_logged.clone();
-                let last_emit_clone = self.last_emit.clone();
-                let speed_state_clone = speed_state.clone();
-                let rate_limiter = self.rate_limiter.clone();
-
-                *active_workers.lock().unwrap() += 1;
-                current_active += 1;
-
-                tokio::spawn(async move {
-                    let rate_limiter = rate_limiter;
-                    let last_emit_clone = last_emit_clone;
-                    let speed_state_clone = speed_state_clone;
-                    let mut chunk = chunk;
-                    let mut attempts = 0;
-                    let max_retries = 10;
-                    let mut final_error = None;
-                    
-                    'worker_mission: loop {
-                        if abort_signal.load(Ordering::Relaxed) {
-                            break 'worker_mission;
-                        }
-                        if let Some(sig) = &cancel_signal {
-                            if sig.load(Ordering::Relaxed) { 
-                                break; 
-                            }
-                        }
-                        if attempts >= max_retries { 
-                            tracing::error!("[{}] Worker reached max retries ({}) for chunk {}-{}", id_clone, max_retries, chunk.start, chunk.end);
-                            break; 
-                        }
-
-                        if attempts > 0 {
-                            let backoff = 2u64.pow(attempts as u32 - 1) * 1000;
-                            let backoff = backoff.min(30000); // capped at 30s
-                            tracing::info!("[{}] Retry #{} for chunk {}-{}. Sleeping {}ms", id_clone, attempts, chunk.start, chunk.end, backoff);
-                            
-                            // Responsive sleep: check for cancellation signal during backoff
-                            let sleep = tokio::time::sleep(std::time::Duration::from_millis(backoff));
-                            tokio::pin!(sleep);
-                            
-                            loop {
-                                tokio::select! {
-                                    _ = &mut sleep => break,
-                                    _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                                        if abort_signal.load(Ordering::Relaxed) { break 'worker_mission; }
-                                        if let Some(sig) = &cancel_signal {
-                                            if sig.load(Ordering::Relaxed) { break 'worker_mission; }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let res = async {
-                            let chunk_file_raw = tokio::fs::OpenOptions::new().write(true).open(&filepath).await?;
-                            let mut chunk_file = BufWriter::with_capacity(128 * 1024, chunk_file_raw);
-                            let current_start = chunk.start + chunk.downloaded;
-                            chunk_file.seek(tokio::io::SeekFrom::Start(current_start)).await?;
-
-                            let range = format!("bytes={}-{}", current_start, chunk.end);
-                            let response = client
-                                .get(url.clone())
-                                .header(reqwest::header::RANGE, range.clone())
-                                .header(reqwest::header::ACCEPT_ENCODING, "identity")
-                                .send()
-                                .await?;
-
-                            if response.status() == 429 || response.status() == 503 {
-                                *throttled_ptr.lock().unwrap() = true;
-                                return Err(DownloadError::Network("Server throttling".to_string()));
-                            }
-
-                            let status = response.status();
-                            let headers = response.headers();
-                            let has_content_range = headers
-                                .contains_key(reqwest::header::CONTENT_RANGE);
-                            if !status.is_success() {
-                                if matches!(
-                                    status,
-                                    reqwest::StatusCode::FORBIDDEN
-                                        | reqwest::StatusCode::RANGE_NOT_SATISFIABLE
-                                        | reqwest::StatusCode::METHOD_NOT_ALLOWED
-                                ) {
-                                    return Err(DownloadError::NoRangeSupport);
-                                }
-                                return Err(DownloadError::Network(format!("HTTP {}", status)));
-                            }
-                            if status != reqwest::StatusCode::PARTIAL_CONTENT && !has_content_range {
-                                if !range_diag_logged.swap(true, Ordering::Relaxed) {
-                                    let content_range = headers
-                                        .get(reqwest::header::CONTENT_RANGE)
-                                        .and_then(|v| v.to_str().ok())
-                                        .unwrap_or("-");
-                                    let accept_ranges = headers
-                                        .get("accept-ranges")
-                                        .and_then(|v| v.to_str().ok())
-                                        .unwrap_or("-");
-                                    let content_length = headers
-                                        .get(reqwest::header::CONTENT_LENGTH)
-                                        .and_then(|v| v.to_str().ok())
-                                        .unwrap_or("-");
-                                    let content_type = headers
-                                        .get(reqwest::header::CONTENT_TYPE)
-                                        .and_then(|v| v.to_str().ok())
-                                        .unwrap_or("-");
-                                    tracing::error!(
-                                        "[{}] Range rejected: status={} range='{}' content-range='{}' accept-ranges='{}' content-length='{}' content-type='{}'",
-                                        id_clone,
-                                        status,
-                                        range,
-                                        content_range,
-                                        accept_ranges,
-                                        content_length,
-                                        content_type
-                                    );
-                                }
-                                return Err(DownloadError::NoRangeSupport);
-                            }
-
-                            {
-                                let mut p = progress.lock().unwrap();
-                                if p.status_phase.as_deref() != Some("downloading") {
-                                    p.status_text = Some("Downloading...".to_string());
-                                    p.status_phase = Some("downloading".to_string());
-                                    p.phase_elapsed_secs = Some(0);
-                                }
-                            }
-
-                            // Capture content-type for detailed error reporting if decoding fails
-                            let content_type = headers
-                                .get(reqwest::header::CONTENT_TYPE)
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("")
-                                .to_string();
-
-                            if content_type.contains("text/html") && url.contains("drive.google.com") {
-                                return Err(DownloadError::Network("Google Drive blocked download (Virus Scan or Login required)".to_string()));
-                            }
-
-                            let mut stream = response.bytes_stream();
-                            let mut local_downloaded = chunk.downloaded;
-                            let mut last_db_update = std::time::Instant::now();
-
-                            while let Ok(item_opt) = tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await {
-                                if abort_signal.load(Ordering::Relaxed) { break; }
-                                if let Some(sig) = &cancel_signal {
-                                    if sig.load(Ordering::Relaxed) { break; }
-                                }
-
-                                let item = match item_opt {
-                                    Some(i) => i,
-                                    None => break, // Stream finished
-                                };
-
-                                let bytes = item.map_err(|e| {
-                                    tracing::error!("[{}] Stream error (ContentType: {}) on chunk {}-{}: {}", id_clone, content_type, chunk.start, chunk.end, e);
-                                    DownloadError::Network(e.to_string())
-                                })?;
-                                chunk_file.write_all(&bytes).await?;
-                                let len = bytes.len() as u64;
-
-                                 if let Some(limiter) = &rate_limiter {
-                                     limiter.acquire(len, &cancel_signal).await;
-                                 }
-
-                                local_downloaded += len;
-                                chunk.downloaded += len;
-                                let current_total_downloaded = downloaded_atomic.fetch_add(len, Ordering::Relaxed) + len;
-
-                                // Throttled progress emission
-                                let now_ms = start_emit_time.elapsed().as_millis() as u64;
-                                let last = last_emit_clone.load(Ordering::Relaxed);
-                                if now_ms - last > 200 {
-                                    if last_emit_clone.compare_exchange(last, now_ms, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
-                                        let mut p = progress.lock().unwrap();
-                                        p.downloaded = current_total_downloaded;
-                                        p.connections = *active_ptr.lock().unwrap();
-                                        
-                                        {
-                                            let mut ss = speed_state_clone.lock().unwrap();
-                                            let interval_elapsed = ss.last_time.elapsed().as_secs_f64();
-                                            if interval_elapsed >= 0.5 {
-                                                let diff = current_total_downloaded.saturating_sub(ss.last_bytes);
-                                                p.speed = (diff as f64 / interval_elapsed) as u64;
-                                                ss.last_bytes = current_total_downloaded;
-                                                ss.last_time = std::time::Instant::now();
-                                                if p.speed > 0 {
-                                                    p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
-                                                }
-                                            }
-                                        }
-                                        (on_progress_cb)(p.clone());
-                                    }
-                                }
-
-                                if last_db_update.elapsed().as_secs() >= 5 {
-                                    if let Some(ref db) = db_path_clone {
-                                        crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
-                                    }
-                                    last_db_update = std::time::Instant::now();
-                                }
-                            }
-                            
-                            chunk_file.flush().await?;
-                            if let Some(ref db) = db_path_clone {
-                                crate::db::update_chunk_progress(db, &id_clone, chunk.start as i64, local_downloaded as i64).ok();
-                            }
-                            Ok::<(), DownloadError>(())
-                        }.await;
-
-                        match res {
-                            Ok(_) => { break; }
-                            Err(e) => {
-                                if matches!(e, DownloadError::NoRangeSupport) {
-                                    abort_signal.store(true, Ordering::Relaxed);
-                                    let mut shared_error = error_ptr.lock().unwrap();
-                                    if shared_error.is_none() {
-                                        tracing::error!(
-                                            "[{}] Worker error on chunk {}-{}: {}",
-                                            id_clone, chunk.start, chunk.end, e
-                                        );
-                                        *shared_error = Some(e.clone());
-                                    }
-                                    final_error = Some(e);
-                                    break;
-                                }
-                                tracing::error!("[{}] Worker error on chunk {}-{}: {}", id_clone, chunk.start, chunk.end, e);
-                                failure_counter.fetch_add(1, Ordering::Relaxed);
-                                if let Some(sig) = &cancel_signal {
-                                    if sig.load(Ordering::Relaxed) { break; }
-                                }
-                                final_error = Some(e);
-                                attempts += 1;
-                                
-                                let retry_delay = 1000 * attempts as u64;
-                                tracing::info!("[{}] Error cooldown: retrying after {}ms...", id_clone, retry_delay);
-                                
-                                // Responsive sleep for the outer retry loop
-                                let sleep = tokio::time::sleep(std::time::Duration::from_millis(retry_delay));
-                                tokio::pin!(sleep);
-                                loop {
-                                    tokio::select! {
-                                        _ = &mut sleep => break,
-                                        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                                            if let Some(sig) = &cancel_signal {
-                                                if sig.load(Ordering::Relaxed) { break 'worker_mission; }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(e) = final_error {
-                        let mut shared_error = error_ptr.lock().unwrap();
-                        if shared_error.is_none() {
-                            *shared_error = Some(e);
-                        }
-                    }
-
-                    *active_ptr.lock().unwrap() -= 1;
-                    let _ = tx.send(()).await;
-                });
-            }
-
-            if last_global_db_update.elapsed().as_secs() >= 1 {
-                let (total_downloaded_p, current_speed) = {
-                    let p = self.progress.lock().unwrap();
-                    (p.downloaded as i64, p.speed as i64)
-                };
-                if let Some(ref db) = self.db_path {
-                    crate::db::update_download_progress(db, &self.config.id, total_downloaded_p, current_speed).ok();
-                }
-                last_global_db_update = std::time::Instant::now();
-            }
-
-            if current_active == 0 && pending_chunks.lock().unwrap().is_empty() {
-                break;
-            }
-
-            tokio::select! {
-                _ = worker_rx.recv() => {},
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {},
+        match run_workers(WorkerOrchestrationConfig {
+            id: self.config.id.clone(),
+            url: url.clone(),
+            filepath: self.config.filepath.clone(),
+            client: self.client.clone(),
+            db_path: self.db_path.clone(),
+            cancel_signal: self.cancel_signal.clone(),
+            rate_limiter: self.rate_limiter.clone(),
+            progress: self.progress.clone(),
+            downloaded_atomic: self.downloaded_atomic.clone(),
+            last_emit: self.last_emit.clone(),
+            speed_state,
+            on_progress: on_progress_arc.clone(),
+            pending_chunks: chunks,
+            max_workers,
+            current_target_workers,
+            force_multi: self.config.force_multi,
+        })
+        .await?
+        {
+            WorkerOutcome::Completed => Ok(()),
+            WorkerOutcome::NeedsFallback { reason } => {
+                self.fallback_to_single_connection(on_progress_arc, reason)
+                    .await
             }
         }
-
-        Ok(())
     }
 
     /// Fallback: Downloads a file using a single TCP connection.
-    /// 
-    /// Used when the server lacks `Range` support or for very small files where 
+    ///
+    /// Used when the server lacks `Range` support or for very small files where
     /// multi-threading overhead is counter-productive.
     async fn download_single_connection<F>(&self, on_progress: F) -> Result<(), DownloadError>
     where
@@ -732,13 +394,17 @@ impl Downloader {
         (on_progress)(self.progress.lock().unwrap().clone());
 
         let response = self.client.get(&self.config.url).send().await?;
-        
+
         // Safety check: If we're getting HTML but expecting a file, it's a login/warning page
-        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE)
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if content_type.contains("text/html") {
-            return Err(DownloadError::Network("Server returned a webpage instead of a file. Login may be required.".to_string()));
+            return Err(DownloadError::Network(
+                "Server returned a webpage instead of a file. Login may be required.".to_string(),
+            ));
         }
 
         let total_size = response.content_length().unwrap_or(0);
@@ -773,26 +439,29 @@ impl Downloader {
             }
 
             let current_total = downloaded_atomic.fetch_add(len, Ordering::Relaxed) + len;
-            
+
             // Throttled progress emission
             let now_ms = start_emit_time.elapsed().as_millis() as u64;
             let last = last_emit_clone.load(std::sync::atomic::Ordering::Relaxed);
-            
+
             if now_ms - last > 200 {
-                if last_emit_clone.compare_exchange(last, now_ms, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                if last_emit_clone
+                    .compare_exchange(last, now_ms, Ordering::SeqCst, Ordering::Relaxed)
+                    .is_ok()
+                {
                     let mut p = progress.lock().unwrap();
                     p.downloaded = current_total;
                     p.total = total_size;
                     p.connections = 1;
-                    
+
                     let interval_elapsed = last_speed_time.elapsed().as_secs_f64();
                     if interval_elapsed >= 0.3 {
                         let diff = current_total.saturating_sub(last_speed_bytes);
                         p.speed = (diff as f64 / interval_elapsed) as u64;
-                        
+
                         last_speed_bytes = current_total;
                         last_speed_time = std::time::Instant::now();
-                        
+
                         if p.speed > 0 {
                             p.eta = p.total.saturating_sub(p.downloaded) / p.speed;
                         }
@@ -807,7 +476,7 @@ impl Downloader {
     }
 }
 
-/// Queries a URL using a `HEAD` request to verify if it supports segmented downloads. 
+/// Queries a URL using a `HEAD` request to verify if it supports segmented downloads.
 /// Also extracts the content length and suggested filename.
 pub async fn check_range_support(
     client: &Client,
@@ -852,7 +521,8 @@ pub async fn check_range_support(
             .and_then(|v| v.to_str().ok())
             .map(|v| v == "bytes")
             .unwrap_or(false);
-        let supports_range = accept_ranges || range_response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let supports_range =
+            accept_ranges || range_response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         let total_size = range_response
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
@@ -877,12 +547,14 @@ pub fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> Stri
                 // Format is usually charset'lang'filename (e.g. UTF-8''hello.txt)
                 if let Some(last_quote) = filename_part.rfind('\'') {
                     let actual_name = &filename_part[last_quote + 1..];
-                    if let Ok(decoded) = percent_encoding::percent_decode(actual_name.as_bytes()).decode_utf8() {
+                    if let Ok(decoded) =
+                        percent_encoding::percent_decode(actual_name.as_bytes()).decode_utf8()
+                    {
                         return sanitize_filename(&decoded);
                     }
                 }
             }
-            
+
             // Try standard filename= (often quoted, sometimes improperly percent-encoded by servers)
             if let Some(pos) = cd_str.find("filename=") {
                 let parts = &cd_str[pos + 9..];
@@ -891,7 +563,9 @@ pub fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> Stri
                 if !raw_name.is_empty() {
                     // Even for standard filename=, some servers send percent-encoded strings.
                     // We attempt to decode it; if it's not encoded, it returns the original.
-                    if let Ok(decoded) = percent_encoding::percent_decode(raw_name.as_bytes()).decode_utf8() {
+                    if let Ok(decoded) =
+                        percent_encoding::percent_decode(raw_name.as_bytes()).decode_utf8()
+                    {
                         return sanitize_filename(&decoded);
                     }
                     return sanitize_filename(raw_name);
@@ -902,8 +576,13 @@ pub fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> Stri
 
     // 2. Fall back to URL path
     // We want the last non-empty segment before any query parameters or hash fragments
-    let filename = url.split('?').next().unwrap_or(url)
-        .split('#').next().unwrap_or(url)
+    let filename = url
+        .split('?')
+        .next()
+        .unwrap_or(url)
+        .split('#')
+        .next()
+        .unwrap_or(url)
         .rsplit('/')
         .find(|s| !s.is_empty())
         .map(|s| {
@@ -913,7 +592,7 @@ pub fn extract_filename(url: &str, headers: &reqwest::header::HeaderMap) -> Stri
                 .unwrap_or_else(|_| s.to_string())
         })
         .unwrap_or_else(|| "download".to_string());
-        
+
     sanitize_filename(&filename)
 }
 
