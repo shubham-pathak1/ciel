@@ -42,6 +42,15 @@ impl CrashMarkerState {
 /// 4. Registers all IPC commands accessible from the frontend.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .with_target(false)
+        .compact()
+        .try_init();
+
     let context = tauri::generate_context!();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
