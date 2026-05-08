@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use reqwest::Client;
+use reqwest::header::{ACCEPT, REFERER};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
@@ -12,6 +13,8 @@ mod workers;
 pub use types::{ChunkRecord, DownloadConfig, DownloadError, DownloadProgress};
 use types::{SharedRateLimiter, WorkChunk};
 use workers::{run_workers, SpeedState, WorkerOrchestrationConfig, WorkerOutcome};
+
+const RANGE_PROBE_TIMEOUT_SECS: u64 = 2;
 
 /// A sophisticated, multi-threaded HTTP download engine.
 ///
@@ -32,14 +35,46 @@ pub struct Downloader {
 }
 
 impl Downloader {
+    fn remember_single_connection_host(&self) {
+        let Some(ref db_path) = self.db_path else {
+            return;
+        };
+        let host = reqwest::Url::parse(&self.config.url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_lowercase()));
+        let Some(host) = host else {
+            return;
+        };
+
+        let key = "http_single_connection_hosts";
+        let existing = crate::db::get_setting(db_path, key)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let mut hosts: Vec<String> = existing
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !hosts.iter().any(|h| h == &host) {
+            hosts.push(host);
+            let serialized = hosts.join(",");
+            let _ = crate::db::set_setting(db_path, key, &serialized);
+        }
+    }
+
     async fn fallback_to_single_connection(
         &self,
         on_progress: Arc<dyn Fn(DownloadProgress) + Send + Sync + 'static>,
         reason: &str,
+        cache_single_host: bool,
     ) -> Result<(), DownloadError> {
         if let Some(ref db) = self.db_path {
             crate::db::update_download_metadata(db, &self.config.id, Some("http_no_range")).ok();
             crate::db::delete_download_chunks(db, &self.config.id).ok();
+        }
+        if cache_single_host {
+            self.remember_single_connection_host();
         }
 
         let _ = std::fs::remove_file(&self.config.filepath);
@@ -186,20 +221,17 @@ impl Downloader {
 
         // 2. Discover metadata and verify segmented download support.
         let (supports_range, total_size, filename_opt) = if self.config.force_multi {
-            if let Some(size) = self.config.size_hint {
-                tracing::info!(
-                    "[{}] Skipping range probe (force_multi_http enabled). size_hint={}",
-                    self.config.id,
-                    size
-                );
-                (true, size, None)
+            tracing::info!(
+                "[{}] force_multi_http enabled. Probing range support before parallel start.",
+                self.config.id
+            );
+            let (supports, probed_total, name) = check_range_support(&self.client, &url).await?;
+            let resolved_total = if probed_total > 0 {
+                probed_total
             } else {
-                tracing::info!(
-                    "[{}] force_multi_http enabled but size unknown; falling back to single connection.",
-                    self.config.id
-                );
-                return self.download_single_connection(on_progress).await;
-            }
+                self.config.size_hint.unwrap_or(0)
+            };
+            (supports, resolved_total, name)
         } else {
             check_range_support(&self.client, &url).await?
         };
@@ -220,13 +252,24 @@ impl Downloader {
             p.phase_elapsed_secs = Some(0);
         }
 
-        if !supports_range || total_size == 0 {
+        if !supports_range {
             if self.config.force_multi {
                 tracing::error!(
-                    "[{}] Range not confirmed or size unknown; falling back to single connection to avoid corruption.",
+                    "[{}] Range not confirmed; falling back to single connection.",
                     self.config.id
                 );
             }
+            let on_progress_arc: Arc<dyn Fn(DownloadProgress) + Send + Sync + 'static> =
+                Arc::new(on_progress);
+            return self
+                .fallback_to_single_connection(
+                    on_progress_arc,
+                    "Server does not support resume. Switching to single connection...",
+                    true,
+                )
+                .await;
+        }
+        if total_size == 0 {
             return self.download_single_connection(on_progress).await;
         }
 
@@ -365,13 +408,15 @@ impl Downloader {
             pending_chunks: chunks,
             max_workers,
             current_target_workers,
-            force_multi: self.config.force_multi,
         })
         .await?
         {
             WorkerOutcome::Completed => Ok(()),
-            WorkerOutcome::NeedsFallback { reason } => {
-                self.fallback_to_single_connection(on_progress_arc, reason)
+            WorkerOutcome::NeedsFallback {
+                reason,
+                cache_single_host,
+            } => {
+                self.fallback_to_single_connection(on_progress_arc, reason, cache_single_host)
                     .await
             }
         }
@@ -393,18 +438,48 @@ impl Downloader {
         }
         (on_progress)(self.progress.lock().unwrap().clone());
 
-        let response = self.client.get(&self.config.url).send().await?;
+        let mut response = decorate_media_request(self.client.get(&self.config.url), &self.config.url)
+            .send()
+            .await?;
 
         // Safety check: If we're getting HTML but expecting a file, it's a login/warning page
-        let content_type = response
+        let mut content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
         if content_type.contains("text/html") {
-            return Err(DownloadError::Network(
-                "Server returned a webpage instead of a file. Login may be required.".to_string(),
-            ));
+            // Some hosts apply hotlink protection and return HTML unless a Referer/Origin is present.
+            if let Some(origin) = derive_request_origin(&self.config.url) {
+                let referer = format!("{}/", origin.trim_end_matches('/'));
+                if let Ok(retry) = self
+                    .client
+                    .get(&self.config.url)
+                    .header(REFERER, referer)
+                    .header(ACCEPT, "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                    .send()
+                    .await
+                {
+                    let retry_content_type = retry
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    if !retry_content_type.contains("text/html") {
+                        response = retry;
+                        content_type = retry_content_type;
+                    }
+                }
+            }
+
+            if content_type.contains("text/html") {
+                return Err(DownloadError::Network(
+                    "Server returned a webpage instead of a file. The host may block direct links (hotlink protection) or require login."
+                        .to_string(),
+                ));
+            }
         }
 
         let total_size = response.content_length().unwrap_or(0);
@@ -484,11 +559,9 @@ pub async fn check_range_support(
 ) -> Result<(bool, u64, Option<String>), DownloadError> {
     let mut filename_opt: Option<String> = None;
 
-    let range_response = client
-        .get(url)
+    let range_response = decorate_media_request(client.get(url), url)
         .header(reqwest::header::RANGE, "bytes=0-0")
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(RANGE_PROBE_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|e| DownloadError::Network(e.to_string()))?;
@@ -512,24 +585,63 @@ pub async fn check_range_support(
         .and_then(|v| v.split('/').last())
         .and_then(|v| v.parse::<u64>().ok());
 
-    let (supports_range, total_size) = if let Some(total) = content_range {
-        (true, total)
+    // Strict capability check:
+    // Only treat range as supported if server responds with 206 + valid Content-Range total.
+    // Some hosts advertise Accept-Ranges but still reject actual parallel chunk requests.
+    let status_is_partial = range_response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let fallback_total = range_response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|val| val.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let (initial_supports_range, total_size) = if status_is_partial {
+        if let Some(total) = content_range {
+            (true, total)
+        } else {
+            (false, fallback_total)
+        }
     } else {
-        let accept_ranges = range_response
-            .headers()
-            .get("accept-ranges")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v == "bytes")
-            .unwrap_or(false);
-        let supports_range =
-            accept_ranges || range_response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-        let total_size = range_response
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|val| val.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        (supports_range, total_size)
+        (false, fallback_total)
+    };
+
+    // Secondary validation:
+    // Some hosts accept bytes=0-0 but reject real chunk offsets.
+    // Probe a non-zero range before enabling parallel mode.
+    let supports_range = if initial_supports_range && total_size > 2048 {
+        let probe_start = (total_size / 2).min(total_size.saturating_sub(1024));
+        let probe_end = (probe_start + 1023).min(total_size.saturating_sub(1));
+        let probe_range = format!("bytes={}-{}", probe_start, probe_end);
+
+        match decorate_media_request(client.get(url), url)
+            .header(reqwest::header::RANGE, probe_range.clone())
+            .timeout(std::time::Duration::from_secs(RANGE_PROBE_TIMEOUT_SECS))
+            .send()
+            .await
+        {
+            Ok(res) => {
+                let valid = res.status() == reqwest::StatusCode::PARTIAL_CONTENT
+                    && res.headers().get(reqwest::header::CONTENT_RANGE).is_some();
+                if !valid {
+                    tracing::info!(
+                        "[RangeProbe] Secondary probe rejected for {} (status={}); forcing single connection.",
+                        url,
+                        res.status()
+                    );
+                }
+                valid
+            }
+            Err(err) => {
+                tracing::info!(
+                    "[RangeProbe] Secondary probe failed for {} ({}); forcing single connection.",
+                    url,
+                    err
+                );
+                false
+            }
+        }
+    } else {
+        initial_supports_range
     };
 
     Ok((supports_range, total_size, filename_opt))
@@ -603,4 +715,32 @@ fn sanitize_filename(name: &str) -> String {
     } else {
         sanitized
     }
+}
+
+fn derive_request_origin(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    match parsed.port() {
+        Some(port) => Some(format!("{}://{}:{}", parsed.scheme(), host, port)),
+        None => Some(format!("{}://{}", parsed.scheme(), host)),
+    }
+}
+
+pub(super) fn decorate_media_request(
+    builder: reqwest::RequestBuilder,
+    url: &str,
+) -> reqwest::RequestBuilder {
+    let mut request = builder
+        .header(
+            ACCEPT,
+            "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        )
+        .header(reqwest::header::ACCEPT_ENCODING, "identity");
+
+    if let Some(origin) = derive_request_origin(url) {
+        let referer = format!("{}/", origin.trim_end_matches('/'));
+        request = request.header(REFERER, referer);
+    }
+
+    request
 }

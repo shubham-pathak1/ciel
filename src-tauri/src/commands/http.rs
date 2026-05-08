@@ -1,17 +1,17 @@
-use crate::db::{self, DbState, Download, DownloadProtocol, DownloadStatus};
-use crate::downloader::{DownloadConfig, Downloader};
-use crate::torrent::TorrentManager;
 use super::{
     ensure_unique_path, execute_post_download_actions, get_category_from_filename,
     resolve_download_path, set_and_emit_download_error,
 };
+use crate::db::{self, DbState, Download, DownloadProtocol, DownloadStatus};
+use crate::downloader::{DownloadConfig, Downloader};
+use crate::torrent::TorrentManager;
+use rookie;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Runtime, State};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{mpsc, Mutex};
-use rookie;
 
 use std::fs;
 
@@ -22,7 +22,17 @@ use std::fs;
 #[derive(Clone)]
 pub struct DownloadManager {
     /// Internal map linking Download IDs to their respective cancellation senders and progress monitors.
-    active_downloads: Arc<Mutex<HashMap<String, (mpsc::Sender<()>, Arc<std::sync::Mutex<crate::downloader::DownloadProgress>>)>>> ,
+    active_downloads: Arc<
+        Mutex<
+            HashMap<
+                String,
+                (
+                    mpsc::Sender<()>,
+                    Arc<std::sync::Mutex<crate::downloader::DownloadProgress>>,
+                ),
+            >,
+        >,
+    >,
 }
 
 impl DownloadManager {
@@ -82,11 +92,15 @@ impl DownloadManager {
 /// Helper to transform Google Drive viewer links into direct download links.
 fn transform_google_drive_url(url: &str) -> String {
     // 1. Convert /file/d/ID/view -> uc?export=download&id=ID
-    if url.contains("drive.google.com/file/d/") && (url.contains("/view") || url.contains("/edit")) {
+    if url.contains("drive.google.com/file/d/") && (url.contains("/view") || url.contains("/edit"))
+    {
         if let Some(re) = regex::Regex::new(r"drive\.google\.com/file/d/([^/?#]+)").ok() {
             if let Some(caps) = re.captures(url) {
                 if let Some(id) = caps.get(1) {
-                    return format!("https://drive.google.com/uc?export=download&id={}&confirm=t", id.as_str());
+                    return format!(
+                        "https://drive.google.com/uc?export=download&id={}&confirm=t",
+                        id.as_str()
+                    );
                 }
             }
         }
@@ -97,7 +111,10 @@ fn transform_google_drive_url(url: &str) -> String {
         if let Some(re) = regex::Regex::new(r"id=([^&?#]+)").ok() {
             if let Some(caps) = re.captures(url) {
                 if let Some(id) = caps.get(1) {
-                    return format!("https://drive.google.com/uc?export=download&id={}&confirm=t", id.as_str());
+                    return format!(
+                        "https://drive.google.com/uc?export=download&id={}&confirm=t",
+                        id.as_str()
+                    );
                 }
             }
         }
@@ -125,7 +142,10 @@ pub struct UrlTypeInfo {
 /// Instead of downloading the full file, it uses HTTP `GET` with a `Range` header
 /// or sniffs the first few bytes to extract headers and verify the content type.
 #[tauri::command]
-pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Result<UrlTypeInfo, String> {
+pub async fn validate_url_type(
+    db_state: State<'_, DbState>,
+    url: String,
+) -> Result<UrlTypeInfo, String> {
     let url = transform_google_drive_url(&url);
     if url.starts_with("magnet:") {
         return Ok(UrlTypeInfo {
@@ -186,7 +206,12 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
     let hinted_filename = Some(crate::downloader::extract_filename(&url, headers));
 
     // Special check for Google Drive: if it's returning HTML, it's likely the "virus scan" warning or login page.
-    if url.contains("drive.google.com/uc") && content_type.as_ref().map(|s| s.contains("text/html")).unwrap_or(false) {
+    if url.contains("drive.google.com/uc")
+        && content_type
+            .as_ref()
+            .map(|s| s.contains("text/html"))
+            .unwrap_or(false)
+    {
         // Optimization: Try to find a confirm token in the HTML body if confirm=t failed.
         // We need to fetch the FULL body, so we retry without the Range header.
         if let Ok(full_res) = client.get(&url).send().await {
@@ -195,7 +220,9 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
             // 1. Scrape metadata from HTML as a fallback
             let mut scraped_filename = None;
             let mut scraped_size = None;
-            if let Some(re) = regex::Regex::new(r#"class="uc-name-size"><a [^>]+>([^<]+)</a>\s*\(([^)]+)\)"#).ok() {
+            if let Some(re) =
+                regex::Regex::new(r#"class="uc-name-size"><a [^>]+>([^<]+)</a>\s*\(([^)]+)\)"#).ok()
+            {
                 if let Some(caps) = re.captures(&body) {
                     scraped_filename = caps.get(1).map(|m| m.as_str().to_string());
                     scraped_size = caps.get(2).map(|m| m.as_str().to_string());
@@ -207,10 +234,16 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
             let mut found_uuid = None;
 
             if let Some(re) = regex::Regex::new(r#"name="confirm" value="([^"]+)""#).ok() {
-                found_token = re.captures(&body).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+                found_token = re
+                    .captures(&body)
+                    .and_then(|c| c.get(1))
+                    .map(|m| m.as_str().to_string());
             }
             if let Some(re) = regex::Regex::new(r#"name="uuid" value="([^"]+)""#).ok() {
-                found_uuid = re.captures(&body).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+                found_uuid = re
+                    .captures(&body)
+                    .and_then(|c| c.get(1))
+                    .map(|m| m.as_str().to_string());
             }
 
             // 3. Loop Prevention: If we only found 't' and we already had it, or we found nothing new
@@ -255,13 +288,23 @@ pub async fn validate_url_type(db_state: State<'_, DbState>, url: String) -> Res
     }
 
     // 3. If content-type is generic or missing, try to sniff magic bytes
-    if content_type
-        .as_deref()
-        .map_or(true, |ct| ct == "application/octet-stream" || ct == "application/x-zip-compressed")
-    {
-        if let Ok(range_res) = client.get(&url).header("Range", "bytes=0-3").header(reqwest::header::ACCEPT_ENCODING, "identity").send().await {
+    if content_type.as_deref().map_or(true, |ct| {
+        ct == "application/octet-stream" || ct == "application/x-zip-compressed"
+    }) {
+        if let Ok(range_res) = client
+            .get(&url)
+            .header("Range", "bytes=0-3")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+        {
             if let Ok(bytes) = range_res.bytes().await {
-                if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b && bytes[2] == 0x03 && bytes[3] == 0x04 {
+                if bytes.len() >= 4
+                    && bytes[0] == 0x50
+                    && bytes[1] == 0x4b
+                    && bytes[2] == 0x03
+                    && bytes[3] == 0x04
+                {
                     content_type = Some("application/zip".to_string());
                 }
             }
@@ -308,7 +351,10 @@ fn get_cookies_from_firefox_deep(url_str: &str) -> Option<String> {
 
     // 1. Resolve Firefox Profile directory on Windows
     let app_data = std::env::var("APPDATA").ok()?;
-    let profiles_path = Path::new(&app_data).join("Mozilla").join("Firefox").join("Profiles");
+    let profiles_path = Path::new(&app_data)
+        .join("Mozilla")
+        .join("Firefox")
+        .join("Profiles");
 
     tracing::info!("[Firefox] Scaning for profiles in: {:?}", profiles_path);
     if !profiles_path.exists() {
@@ -325,11 +371,14 @@ fn get_cookies_from_firefox_deep(url_str: &str) -> Option<String> {
             if cookie_db.exists() {
                 tracing::info!("[Firefox] Found profile with cookies: {:?}", entry.path());
                 // 3. SECRETS OF THE DEEP: Copy the database to bypass Firefox's file lock
-                let temp_db = std::env::temp_dir().join(format!("ciel_tmp_cookies_{}.sqlite", uuid::Uuid::new_v4()));
+                let temp_db = std::env::temp_dir()
+                    .join(format!("ciel_tmp_cookies_{}.sqlite", uuid::Uuid::new_v4()));
                 if fs::copy(&cookie_db, &temp_db).is_ok() {
                     // 4. Use rusqlite to read the copied database
                     if let Ok(conn) = rusqlite::Connection::open(&temp_db) {
-                        let stmt = conn.prepare("SELECT name, value, host FROM moz_cookies").ok();
+                        let stmt = conn
+                            .prepare("SELECT name, value, host FROM moz_cookies")
+                            .ok();
                         if let Some(mut stmt) = stmt {
                             let rows = stmt
                                 .query_map([], |row| {
@@ -402,7 +451,8 @@ fn get_cookies_from_browser(browser: &str, url: &str) -> Option<String> {
                 .iter()
                 .filter(|c| {
                     let cookie_domain = c.domain.trim_start_matches('.').to_lowercase();
-                    target_host == cookie_domain || target_host.ends_with(&format!(".{}", cookie_domain))
+                    target_host == cookie_domain
+                        || target_host.ends_with(&format!(".{}", cookie_domain))
                 })
                 .map(|c| format!("{}={}", c.name, c.value))
                 .collect::<Vec<_>>()
@@ -419,6 +469,24 @@ fn get_cookies_from_browser(browser: &str, url: &str) -> Option<String> {
             None
         }
     }
+}
+
+fn is_single_connection_host(db_path: &str, url: &str) -> bool {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()));
+    let Some(host) = host else {
+        return false;
+    };
+
+    let hosts_raw = db::get_setting(db_path, "http_single_connection_hosts")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    hosts_raw
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .any(|h| !h.is_empty() && h == host)
 }
 
 /// Bridge: Initiates a new HTTP download.
@@ -463,11 +531,12 @@ pub async fn add_download<R: Runtime>(
 
     // Streamline: No synchronous sniffing here.
     // The Downloader will handle metadata discovery in the background to prevent UI lag.
-    let mut filename = if let Ok(decoded) = percent_encoding::percent_decode(filename.as_bytes()).decode_utf8() {
-        decoded.into_owned()
-    } else {
-        filename
-    };
+    let mut filename =
+        if let Ok(decoded) = percent_encoding::percent_decode(filename.as_bytes()).decode_utf8() {
+            decoded.into_owned()
+        } else {
+            filename
+        };
 
     if filename.is_empty() {
         filename = "download_file".to_string();
@@ -492,7 +561,8 @@ pub async fn add_download<R: Runtime>(
 
     let active_count = manager.active_downloads.lock().await.len();
     let (torrent_active, _) = torrent_manager.get_global_status().await;
-    let should_queue = !start_paused.unwrap_or(false) && (active_count + torrent_active) >= max_simultaneous;
+    let should_queue =
+        !start_paused.unwrap_or(false) && (active_count + torrent_active) >= max_simultaneous;
 
     let id = uuid::Uuid::new_v4().to_string();
     let download = Download {
@@ -539,7 +609,13 @@ pub async fn add_download<R: Runtime>(
 
     // Only start if not paused and not queued
     if !start_paused.unwrap_or(false) && !should_queue {
-        start_download_task(app, db_state.path.clone(), manager.inner().clone(), download.clone()).await?;
+        start_download_task(
+            app,
+            db_state.path.clone(),
+            manager.inner().clone(),
+            download.clone(),
+        )
+        .await?;
     }
 
     Ok(download)
@@ -562,11 +638,21 @@ pub(super) async fn start_download_task<R: Runtime>(
     let url = download.url.clone();
     let filepath = download.filepath.clone();
     let filename = download.filename.clone(); // Clone filename for use in tokio::spawn
-    let known_single_connection = download.metadata.as_deref() == Some("http_no_range");
+    let host_forced_single = is_single_connection_host(&db_path, &download.url);
+    let known_single_connection =
+        download.metadata.as_deref() == Some("http_no_range") || host_forced_single;
+    let configured_max_connections = db::get_setting(&db_path, "max_connections")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(16)
+        .max(1);
+    let persisted_connections = (download.connections as u8).max(1);
+    let effective_connections = persisted_connections.min(configured_max_connections);
     let connections = if known_single_connection {
         1
     } else {
-        download.connections as u8
+        effective_connections
     };
 
     // Create cancellation channel and signal
@@ -611,23 +697,36 @@ pub(super) async fn start_download_task<R: Runtime>(
             speed_limit,
             user_agent: download.user_agent.clone(),
             cookies,
-            force_multi: force_multi_http && !known_single_connection,
-            size_hint: if download.size > 0 { Some(download.size as u64) } else { None },
+            force_multi: force_multi_http && !known_single_connection && connections > 1,
+            size_hint: if download.size > 0 {
+                Some(download.size as u64)
+            } else {
+                None
+            },
         };
 
-        if known_single_connection {
+    if known_single_connection {
+        if host_forced_single {
+            tracing::info!(
+                "[{}] Host is marked single-connection-only. Skipping parallel mode.",
+                id
+            );
+        } else {
             tracing::info!(
                 "[{}] Known single-connection HTTP source. Skipping parallel mode.",
                 id
             );
         }
+    }
 
         let downloader = Downloader::new(config)
             .with_db(db_path.clone())
             .with_cancel_signal(is_cancelled.clone()); // Pass signal
 
         let progress_obj = downloader.get_progress();
-        manager.add_active(id.clone(), tx, progress_obj.clone()).await;
+        manager
+            .add_active(id.clone(), tx, progress_obj.clone())
+            .await;
 
         let id_inner = id.clone();
         let db_path_inner = db_path.clone();
@@ -649,10 +748,27 @@ pub(super) async fn start_download_task<R: Runtime>(
                             let p = progress.lock().unwrap();
                             (p.downloaded, p.total)
                         };
+                        // Normalize final numbers on completion.
+                        // Some hosts return inconsistent/missing Content-Length, so use the
+                        // written byte count as source of truth when totals disagree.
+                        let resolved_total = if final_total == 0 || final_downloaded < final_total {
+                            final_downloaded
+                        } else {
+                            final_total
+                        };
 
-                        let _ = db::update_download_progress(&db_path_inner, &id_inner, final_downloaded as i64, 0);
-                        if final_total > 0 {
-                            let _ = db::update_download_size(&db_path_inner, &id_inner, final_total as i64);
+                        let _ = db::update_download_progress(
+                            &db_path_inner,
+                            &id_inner,
+                            resolved_total as i64,
+                            0,
+                        );
+                        if resolved_total > 0 {
+                            let _ = db::update_download_size(
+                                &db_path_inner,
+                                &id_inner,
+                                resolved_total as i64,
+                            );
                         }
 
                         let _ = db::mark_download_completed(&db_path_inner, &id_inner);
@@ -695,7 +811,3 @@ pub(super) async fn start_download_task<R: Runtime>(
 
     Ok(())
 }
-
-
-
-

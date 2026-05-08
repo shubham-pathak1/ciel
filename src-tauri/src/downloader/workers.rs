@@ -7,7 +7,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc;
 
 use super::types::{SharedRateLimiter, WorkChunk};
-use super::{DownloadError, DownloadProgress};
+use super::{decorate_media_request, DownloadError, DownloadProgress};
 
 pub(super) struct SpeedState {
     pub(super) last_time: std::time::Instant,
@@ -16,7 +16,10 @@ pub(super) struct SpeedState {
 
 pub(super) enum WorkerOutcome {
     Completed,
-    NeedsFallback { reason: &'static str },
+    NeedsFallback {
+        reason: &'static str,
+        cache_single_host: bool,
+    },
 }
 
 pub(super) struct WorkerOrchestrationConfig {
@@ -35,7 +38,6 @@ pub(super) struct WorkerOrchestrationConfig {
     pub(super) pending_chunks: Vec<WorkChunk>,
     pub(super) max_workers: u8,
     pub(super) current_target_workers: u8,
-    pub(super) force_multi: bool,
 }
 
 pub(super) async fn run_workers(
@@ -57,7 +59,6 @@ pub(super) async fn run_workers(
         pending_chunks,
         max_workers,
         current_target_workers,
-        force_multi,
     } = cfg;
 
     let error_occurred = Arc::new(Mutex::new(None));
@@ -76,6 +77,11 @@ pub(super) async fn run_workers(
     let (worker_tx, mut worker_rx) = mpsc::channel::<()>(32);
     let mut last_global_db_update = std::time::Instant::now();
     let start_emit_time = std::time::Instant::now();
+    let mut target_workers = current_target_workers.clamp(1, max_workers.max(1));
+    let mut last_failure_seen = 0usize;
+    let mut last_scale_down_at = std::time::Instant::now();
+    let mut last_scale_up_at = std::time::Instant::now();
+    let mut stable_since = std::time::Instant::now();
 
     loop {
         let worker_error = { error_occurred.lock().unwrap().clone() };
@@ -88,31 +94,96 @@ pub(super) async fn run_workers(
                 );
                 return Ok(WorkerOutcome::NeedsFallback {
                     reason: "Server does not support resume. Switching to single connection...",
+                    cache_single_host: true,
                 });
             }
             return Err(err);
         }
 
-        if force_multi {
-            let failures = failure_count.load(Ordering::Relaxed);
-            let downloaded = downloaded_atomic.load(Ordering::Relaxed);
-            if downloaded == 0
-                && failures >= max_workers as usize
-                && multi_start.elapsed().as_secs() >= 3
-            {
-                abort_workers.store(true, Ordering::Relaxed);
-                tracing::info!(
-                    "[{}] Falling back to single connection after repeated worker failures.",
-                    id
-                );
-                return Ok(WorkerOutcome::NeedsFallback {
-                    reason: "Parallel download was unstable. Switching to single connection...",
-                });
+        let failures = failure_count.load(Ordering::Relaxed);
+        let downloaded = downloaded_atomic.load(Ordering::Relaxed);
+        // If parallel workers repeatedly fail before making any forward progress,
+        // switch to single-connection mode regardless of force_multi setting.
+        // This keeps high-connection starts (e.g. 10) from getting stuck in noisy retries.
+        let fallback_failure_threshold = if target_workers >= 6 {
+            // For higher parallelism, fail fast once roughly half the workers
+            // have errored without any forward progress.
+            (target_workers / 2).max(3) as usize
+        } else {
+            target_workers.max(1) as usize
+        };
+
+        if downloaded == 0
+            && failures >= fallback_failure_threshold
+            && multi_start.elapsed().as_secs() >= 3
+        {
+            abort_workers.store(true, Ordering::Relaxed);
+            tracing::info!(
+                "[{}] Falling back to single connection after repeated worker failures.",
+                id
+            );
+            return Ok(WorkerOutcome::NeedsFallback {
+                reason: "Parallel download was unstable. Switching to single connection...",
+                cache_single_host: false,
+            });
+        }
+
+        // Adaptive worker scaling (AIMD-style):
+        // - Decrease quickly on throttling/repeated chunk failures.
+        // - Increase slowly (+1) after sustained stability.
+        let now = std::time::Instant::now();
+        let failures_now = failure_count.load(Ordering::Relaxed);
+        let had_new_failures = failures_now > last_failure_seen;
+        let throttled_now = {
+            let mut t = throttled.lock().unwrap();
+            if *t {
+                *t = false;
+                true
+            } else {
+                false
             }
+        };
+
+        if had_new_failures || throttled_now {
+            stable_since = now;
+            if now.duration_since(last_scale_down_at) >= std::time::Duration::from_secs(2)
+                && target_workers > 1
+            {
+                let previous = target_workers;
+                // Multiplicative decrease with floor at 1 worker.
+                let reduced = ((target_workers as f32) * 0.7).floor() as u8;
+                target_workers = reduced.max(1);
+                if target_workers < previous {
+                    tracing::info!(
+                        "[{}] Adaptive scaling: {} -> {} workers (throttle/failures detected)",
+                        id,
+                        previous,
+                        target_workers
+                    );
+                }
+                last_scale_down_at = now;
+            }
+            last_failure_seen = failures_now;
+        } else if now.duration_since(stable_since) >= std::time::Duration::from_secs(8)
+            && now.duration_since(last_scale_up_at) >= std::time::Duration::from_secs(8)
+            && target_workers < max_workers
+            && !pending_chunks.lock().unwrap().is_empty()
+        {
+            let previous = target_workers;
+            target_workers = (target_workers + 1).min(max_workers);
+            if target_workers > previous {
+                tracing::info!(
+                    "[{}] Adaptive scaling: {} -> {} workers (stable transfer)",
+                    id,
+                    previous,
+                    target_workers
+                );
+            }
+            last_scale_up_at = now;
         }
 
         let mut current_active = *active_workers.lock().unwrap();
-        while current_active < current_target_workers {
+        while current_active < target_workers {
             let pending = pending_chunks.clone();
             let chunk = {
                 let mut p = pending.lock().unwrap();
@@ -206,10 +277,11 @@ pub(super) async fn run_workers(
                         chunk_file.seek(tokio::io::SeekFrom::Start(current_start)).await?;
 
                         let range = format!("bytes={}-{}", current_start, chunk.end);
-                        let response = client_clone
-                            .get(url_clone.clone())
+                        let response = decorate_media_request(
+                            client_clone.get(url_clone.clone()),
+                            &url_clone,
+                        )
                             .header(reqwest::header::RANGE, range.clone())
-                            .header(reqwest::header::ACCEPT_ENCODING, "identity")
                             .send()
                             .await?;
 
@@ -396,7 +468,7 @@ pub(super) async fn run_workers(
                                 abort_signal.store(true, Ordering::Relaxed);
                                 let mut shared_error = error_ptr.lock().unwrap();
                                 if shared_error.is_none() {
-                                    tracing::error!(
+                                    tracing::info!(
                                         "[{}] Worker error on chunk {}-{}: {}",
                                         id_clone,
                                         chunk.start,

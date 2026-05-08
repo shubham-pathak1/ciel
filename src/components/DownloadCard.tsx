@@ -35,8 +35,15 @@ export const DownloadCard = memo(React.forwardRef<HTMLDivElement, {
         const hasNetworkAheadOfVerified = networkReceived > verifiedBytes + 256 * 1024;
         const shouldUseNetworkProgress =
             download.protocol === "torrent" && (isPreparingFirstPiece || hasNetworkAheadOfVerified);
-        const displayDownloaded = shouldUseNetworkProgress ? networkReceived : verifiedBytes;
-        const progress = totalBytes > 0 ? Math.min((displayDownloaded / totalBytes) * 100, 100) : 0;
+        const isCompleted = download.status === "completed";
+        const displayDownloaded = isCompleted
+            ? (totalBytes > 0 ? totalBytes : verifiedBytes)
+            : (shouldUseNetworkProgress ? networkReceived : verifiedBytes);
+        const progress = isCompleted
+            ? 100
+            : totalBytes > 0
+                ? Math.min((displayDownloaded / totalBytes) * 100, 100)
+                : 0;
         const isIndeterminateStatus =
             statusText === "Initializing..." ||
             statusText === "Fetching Metadata..." ||
