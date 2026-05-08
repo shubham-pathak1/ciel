@@ -12,12 +12,12 @@
 //! - **Video (`video`)**: Specialized handling for YouTube and other video platforms.
 //! - **Tray (`tray`) & Clipboard (`clipboard`)**: OS-level integrations for better UX.
 
+pub mod clipboard;
 pub mod commands;
 pub mod db;
 pub mod downloader;
-mod torrent;
 mod scheduler;
-pub mod clipboard;
+mod torrent;
 pub mod tray;
 
 use tauri::Listener;
@@ -34,7 +34,7 @@ impl CrashMarkerState {
 }
 
 /// The primary entry point to initialize and launch the Ciel application.
-/// 
+///
 /// This function:
 /// 1. Bootstraps the database and runs necessary migrations.
 /// 2. Initializes the HTTP and Torrent download managers.
@@ -62,9 +62,11 @@ pub fn run() {
         }))
         .setup(|app| {
             let app_handle = app.handle().clone();
-            
+
             // 1. Resolve Paths (CPU only - very fast)
-            let app_data_path = app_handle.path().app_data_dir()
+            let app_data_path = app_handle
+                .path()
+                .app_data_dir()
                 .map_err(|e| format!("Failed to get app data dir: {}", e))?;
             let db_path = app_data_path.join("ciel.db");
             let torrent_session_dir = app_data_path.join("torrents");
@@ -87,7 +89,7 @@ pub fn run() {
                 path: db_path.to_string_lossy().to_string(),
             });
             app.manage(commands::DownloadManager::new());
-            
+
             // Start TorrentManager with "Optimistic" defaults.
             // It will warm up its engine in its own background task.
             let fastresume_enabled = !had_unclean;
@@ -118,7 +120,7 @@ pub fn run() {
                 let _ = tray::create_tray(&handle);
                 clipboard::start_clipboard_monitor(handle.clone());
                 scheduler::start_scheduler(handle.clone());
-                
+
                 // Note: The torrent engine has its own background init in TorrentManager::new
             });
 

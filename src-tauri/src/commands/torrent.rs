@@ -1,6 +1,8 @@
+use super::{
+    ensure_unique_path, resolve_download_path, set_and_emit_download_error, DownloadManager,
+};
 use crate::db::{self, DbState, Download, DownloadProtocol, DownloadStatus};
 use crate::torrent::TorrentManager;
-use super::{DownloadManager, ensure_unique_path, resolve_download_path, set_and_emit_download_error};
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Runtime, State};
 
@@ -32,8 +34,9 @@ pub(crate) fn parse_optional_torrent_indices_metadata(
     match metadata {
         None => Ok(None),
         Some(raw) => {
-            let parsed = parse_torrent_indices_metadata(raw)
-                .ok_or_else(|| "Torrent selection metadata is invalid. Please re-add this torrent.".to_string())?;
+            let parsed = parse_torrent_indices_metadata(raw).ok_or_else(|| {
+                "Torrent selection metadata is invalid. Please re-add this torrent.".to_string()
+            })?;
             if parsed.is_empty() {
                 return Err("No files are selected for this torrent task.".to_string());
             }
@@ -76,7 +79,8 @@ pub async fn add_torrent<R: Runtime>(
     }
 
     // Finalize resolved path (Smart Duplicate Handling)
-    let resolved_path = resolve_download_path(&app, &db_state.path, &filename, output_folder.clone());
+    let resolved_path =
+        resolve_download_path(&app, &db_state.path, &filename, output_folder.clone());
     let final_resolved_path = ensure_unique_path(&db_state.path, resolved_path.clone());
 
     // Extract the final unique filename from the path
@@ -184,22 +188,26 @@ pub async fn add_torrent<R: Runtime>(
 
     // Only start if not paused and not queued
     if !should_queue {
-        let _ = app.emit("download-progress", serde_json::json!({
-            "id": id,
-            "total": download.size.max(0) as u64,
-            "downloaded": 0u64,
-            "network_received": 0u64,
-            "verified_speed": 0u64,
-            "speed": 0u64,
-            "eta": 0u64,
-            "connections": 0u64,
-            "status_text": "Initializing...",
-            "status_phase": "initializing",
-            "phase_elapsed_secs": 0u64,
-        }));
+        let _ = app.emit(
+            "download-progress",
+            serde_json::json!({
+                "id": id,
+                "total": download.size.max(0) as u64,
+                "downloaded": 0u64,
+                "network_received": 0u64,
+                "verified_speed": 0u64,
+                "speed": 0u64,
+                "eta": 0u64,
+                "connections": 0u64,
+                "status_text": "Initializing...",
+                "status_phase": "initializing",
+                "phase_elapsed_secs": 0u64,
+            }),
+        );
 
         if !torrent_manager.wait_until_ready(30000).await {
-            let msg = "Torrent engine is still initializing. Please retry in a few seconds.".to_string();
+            let msg =
+                "Torrent engine is still initializing. Please retry in a few seconds.".to_string();
             set_and_emit_download_error(&app, &db_state.path, &id, &msg);
             return Err(msg);
         }

@@ -1,15 +1,15 @@
 //! System Tray Integration
-//! 
+//!
 //! This module provides the system tray (notification area) implementation.
 //! It allows the application to remain active and accessible even when
 //! the main window is hidden.
 
+use crate::{scheduler, CrashMarkerState};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder,
 };
-use crate::{scheduler, CrashMarkerState};
 
 /// Helper function to show or recreate the main window.
 /// If the window was destroyed to save RAM, this recreates it.
@@ -25,7 +25,7 @@ pub fn show_or_create_window<R: Runtime>(app: &AppHandle<R>) {
         } else {
             WebviewUrl::App("index.html".into())
         };
-        
+
         if let Ok(window) = WebviewWindowBuilder::new(app, "main", url)
             .title("Ciel")
             .inner_size(1100.0, 700.0)
@@ -48,7 +48,7 @@ pub fn show_or_create_window<R: Runtime>(app: &AppHandle<R>) {
 }
 
 /// Bootstraps the system tray icon, context menu, and event handlers.
-/// 
+///
 /// The tray includes:
 /// - "Show Ciel": Restores and focuses the main window.
 /// - "Quit": Completely exits the application.
@@ -62,37 +62,40 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let sep2 = PredefinedMenuItem::separator(app)?;
     let show_i = MenuItem::with_id(app, "show", "Show Ciel", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    
-    let menu = Menu::with_items(app, &[
-        &summary_i, 
-        &sep1, 
-        &pause_all_i, 
-        &resume_all_i, 
-        &sep2, 
-        &show_i, 
-        &quit_i
-    ])?;
+
+    let menu = Menu::with_items(
+        app,
+        &[
+            &summary_i,
+            &sep1,
+            &pause_all_i,
+            &resume_all_i,
+            &sep2,
+            &show_i,
+            &quit_i,
+        ],
+    )?;
 
     // Background loop to update the tray summary in real-time
     let app_handle = app.clone();
     let summary_clone = summary_i.clone();
-    
+
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            
+
             let manager = app_handle.state::<crate::commands::DownloadManager>();
             let torrent_manager = app_handle.state::<crate::torrent::TorrentManager>();
-            
+
             let (h_count, h_speed) = manager.get_global_status().await;
             let (t_count, t_speed) = torrent_manager.get_global_status().await;
-            
+
             let total_count = h_count + t_count;
             let total_speed = h_speed + t_speed;
-            
+
             let speed_text = format_speed(total_speed);
             let text = format!("📥 {} Active • {}", total_count, speed_text);
-            
+
             let _ = summary_clone.set_text(text);
         }
     });
@@ -147,7 +150,7 @@ fn format_speed(bps: u64) -> String {
     if bps == 0 {
         return "0 B/s".to_string();
     }
-    
+
     if bps < 1024 {
         format!("{} B/s", bps)
     } else if bps < 1024 * 1024 {

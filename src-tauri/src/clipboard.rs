@@ -1,20 +1,20 @@
 //! Clipboard Monitoring Module
-//! 
-//! This module implements the "Auto-Catch" feature, which monitors the system 
+//!
+//! This module implements the "Auto-Catch" feature, which monitors the system
 //! clipboard for magnet links or downloadable URLs and notifies the frontend.
 
+use crate::db;
 use arboard::Clipboard;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use crate::db;
 
 /// Starts a background loop that polls the clipboard every second.
-/// 
+///
 /// It implements:
 /// - **Setting Polling**: Checks the `autocatch_enabled` setting every 5 seconds.
-/// - **Deduplication**: Only emits the `autocatch-url` event if the clipboard 
+/// - **Deduplication**: Only emits the `autocatch-url` event if the clipboard
 ///   content has changed since the last catch.
-/// - **URL Validation**: Heuristically determines if the clipboard contains a 
+/// - **URL Validation**: Heuristically determines if the clipboard contains a
 ///   link relevant to Ciel.
 pub fn start_clipboard_monitor<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
@@ -31,14 +31,15 @@ pub fn start_clipboard_monitor<R: Runtime>(app: AppHandle<R>) {
             if last_settings_check.elapsed() > Duration::from_secs(5) {
                 let db_state = app.state::<db::DbState>();
                 let settings = db::get_all_settings(&db_state.path).unwrap_or_default();
-                cached_enabled = settings.get("autocatch_enabled")
+                cached_enabled = settings
+                    .get("autocatch_enabled")
                     .map(|v| v == "true")
                     .unwrap_or(true);
                 last_settings_check = std::time::Instant::now();
             }
 
             if !cached_enabled {
-                last_clipboard.clear(); 
+                last_clipboard.clear();
                 continue;
             }
 
@@ -53,7 +54,7 @@ pub fn start_clipboard_monitor<R: Runtime>(app: AppHandle<R>) {
                                 last_clipboard = text;
                             }
                         }
-                    },
+                    }
                     Err(_) => {
                         // Silent fail for non-text clipboard data.
                     }
@@ -77,22 +78,23 @@ pub fn get_clipboard() -> Result<Option<String>, String> {
             } else {
                 Ok(None)
             }
-        },
-        Err(_) => Ok(None)
+        }
+        Err(_) => Ok(None),
     }
 }
 
 /// Heuristic: Determines if a string is a download-ready URL or Magnet link.
 fn is_valid_url(url: &str) -> bool {
     let url_lower = url.to_lowercase();
-    
+
     // Check for explicit protocols.
-    if url_lower.starts_with("http://") || 
-       url_lower.starts_with("https://") || 
-       url_lower.starts_with("magnet:") {
+    if url_lower.starts_with("http://")
+        || url_lower.starts_with("https://")
+        || url_lower.starts_with("magnet:")
+    {
         return true;
     }
-    
+
     // Context-free check for strings like "mediafire.com/..." or "yts.mx/..."
     if url.contains('.') && !url.contains(' ') && url.len() > 3 {
         return true;

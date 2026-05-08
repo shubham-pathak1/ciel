@@ -48,9 +48,7 @@ impl TorrentManager {
             .map_err(|e| format!("Failed to read .torrent file: {}", e))
     }
 
-    pub(super) fn extract_initial_peers_from_magnet(
-        magnet: &str,
-    ) -> Vec<std::net::SocketAddr> {
+    pub(super) fn extract_initial_peers_from_magnet(magnet: &str) -> Vec<std::net::SocketAddr> {
         let parsed = match url::Url::parse(magnet) {
             Ok(v) => v,
             Err(_) => return Vec::new(),
@@ -209,7 +207,9 @@ impl TorrentManager {
             .await
             .map_err(|e| e.to_string())?;
 
-        let handle = response.into_handle().ok_or("Failed to get torrent handle")?;
+        let handle = response
+            .into_handle()
+            .ok_or("Failed to get torrent handle")?;
 
         // Wait for metadata (timeout after 30s)
         let start = std::time::Instant::now();
@@ -285,7 +285,9 @@ impl TorrentManager {
     /// Pauses an active torrent in the `librqbit` session.
     pub async fn pause_torrent(&self, id: &str) -> Result<(), String> {
         let session_guard = self.session.lock().await;
-        let session = session_guard.as_ref().ok_or("Torrent session is not active")?;
+        let session = session_guard
+            .as_ref()
+            .ok_or("Torrent session is not active")?;
 
         let active = self.active_torrents.lock().await;
         if let Some(handle) = active.get(id) {
@@ -310,7 +312,9 @@ impl TorrentManager {
     /// Resumes a paused torrent in the `librqbit` session.
     pub async fn resume_torrent(&self, id: &str) -> Result<(), String> {
         let session_guard = self.session.lock().await;
-        let session = session_guard.as_ref().ok_or("Torrent session is not active")?;
+        let session = session_guard
+            .as_ref()
+            .ok_or("Torrent session is not active")?;
 
         let active = self.active_torrents.lock().await;
         if let Some(handle) = active.get(id) {
@@ -346,7 +350,9 @@ impl TorrentManager {
         target_path: Option<String>,
     ) -> Result<(), String> {
         let session_guard = self.session.lock().await;
-        let session = session_guard.as_ref().ok_or("Torrent session is not active")?;
+        let session = session_guard
+            .as_ref()
+            .ok_or("Torrent session is not active")?;
 
         let handle_opt = {
             let mut active = self.active_torrents.lock().await;
@@ -357,7 +363,10 @@ impl TorrentManager {
             let info_hash = handle.info_hash();
             // Delete standard
             let _ = session
-                .delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), delete_files)
+                .delete(
+                    librqbit::api::TorrentIdOrHash::Hash(info_hash),
+                    delete_files,
+                )
                 .await;
 
             // FORCED PURGE: Ensure it's gone from session entirely
@@ -403,7 +412,9 @@ impl TorrentManager {
     /// Returns true if it was found and added to the manager's active map.
     pub async fn adopt_from_session(&self, id: &str, info_hash_hex: &str) -> Result<bool, String> {
         let session_guard = self.session.lock().await;
-        let session = session_guard.as_ref().ok_or("Torrent session is not active")?;
+        let session = session_guard
+            .as_ref()
+            .ok_or("Torrent session is not active")?;
 
         let target_hash = info_hash_hex.to_lowercase();
         let existing = session.with_torrents(|iter| {
@@ -433,7 +444,9 @@ impl TorrentManager {
         delete_files: bool,
     ) -> Result<(), String> {
         let session_guard = self.session.lock().await;
-        let session = session_guard.as_ref().ok_or("Torrent session is not active")?;
+        let session = session_guard
+            .as_ref()
+            .ok_or("Torrent session is not active")?;
 
         let hash_to_delete = session.with_torrents(|iter| {
             for (_id, handle) in iter {
@@ -447,7 +460,10 @@ impl TorrentManager {
 
         if let Some(info_hash) = hash_to_delete {
             let _ = session
-                .delete(librqbit::api::TorrentIdOrHash::Hash(info_hash), delete_files)
+                .delete(
+                    librqbit::api::TorrentIdOrHash::Hash(info_hash),
+                    delete_files,
+                )
                 .await;
 
             // POSITIVE CONFIRMATION: Wait for engine to drop it
@@ -492,7 +508,11 @@ impl TorrentManager {
             // Normalize to hex if base32 (32 chars)
             if hash.len() == 32 {
                 let mut alphabet = [0u8; 128];
-                for (i, &c) in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".as_bytes().iter().enumerate() {
+                for (i, &c) in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+                    .as_bytes()
+                    .iter()
+                    .enumerate()
+                {
                     alphabet[c as usize] = i as u8;
                 }
 

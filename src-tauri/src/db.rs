@@ -1,5 +1,5 @@
 //! Ciel Database Module
-//! 
+//!
 //! This module handles the persistence layer of the application using SQLite.
 //! It manages the lifecycle of:
 //! - **Downloads**: Metadata, status, and progress for all download types (HTTP, Torrent, Video).
@@ -141,7 +141,7 @@ pub struct Download {
 }
 
 /// Bootstraps the SQLite database, creates tables, and applies schema migrations.
-/// 
+///
 /// This is called once during application startup in `lib.rs`.
 pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
     let conn = open_db(path)?;
@@ -169,7 +169,7 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             cookies TEXT,
             category TEXT NOT NULL DEFAULT 'Other'
         );
-        "
+        ",
     )?;
 
     // Migrations (old user_agent and cookies migrations are now part of initial table creation)
@@ -234,7 +234,7 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
             ('ask_location', 'false'),
             ('auto_organize', 'false'),
             ('force_multi_http', 'false');
-        "
+        ",
     )?;
 
     // Migration: Add metadata column to downloads table if it doesn't exist
@@ -279,7 +279,10 @@ pub fn init_db<P: AsRef<Path>>(path: P) -> SqliteResult<()> {
         }
 
         if !has_category {
-            conn.execute("ALTER TABLE downloads ADD COLUMN category TEXT NOT NULL DEFAULT 'Other'", [])?;
+            conn.execute(
+                "ALTER TABLE downloads ADD COLUMN category TEXT NOT NULL DEFAULT 'Other'",
+                [],
+            )?;
         }
     }
 
@@ -376,11 +379,10 @@ pub fn insert_download<P: AsRef<Path>>(db_path: P, download: &Download) -> Sqlit
 
 /// Retrieves the status of a specific download.
 pub fn get_download_status(conn: &Connection, id: &str) -> SqliteResult<DownloadStatus> {
-    let status_str: String = conn.query_row(
-        "SELECT status FROM downloads WHERE id = ?1",
-        [id],
-        |row| row.get(0),
-    )?;
+    let status_str: String =
+        conn.query_row("SELECT status FROM downloads WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })?;
     Ok(DownloadStatus::from_str(&status_str))
 }
 
@@ -410,7 +412,11 @@ pub fn mark_download_completed<P: AsRef<Path>>(db_path: P, id: &str) -> SqliteRe
 }
 
 /// Marks a download as failed and stores a human-readable error message.
-pub fn update_download_error<P: AsRef<Path>>(db_path: P, id: &str, message: &str) -> SqliteResult<()> {
+pub fn update_download_error<P: AsRef<Path>>(
+    db_path: P,
+    id: &str,
+    message: &str,
+) -> SqliteResult<()> {
     let conn = open_db(db_path)?;
     conn.execute(
         "UPDATE downloads SET status = 'error', error_message = ?1 WHERE id = ?2",
@@ -435,25 +441,14 @@ pub fn update_download_progress<P: AsRef<Path>>(
 }
 
 /// Updates the total size of a download. Useful when size is determined after metadata extraction.
-pub fn update_download_size<P: AsRef<Path>>(
-    db_path: P,
-    id: &str,
-    size: i64,
-) -> SqliteResult<()> {
+pub fn update_download_size<P: AsRef<Path>>(db_path: P, id: &str, size: i64) -> SqliteResult<()> {
     let conn = open_db(db_path)?;
-    conn.execute(
-        "UPDATE downloads SET size = ?1 WHERE id = ?2",
-        (size, id),
-    )?;
+    conn.execute("UPDATE downloads SET size = ?1 WHERE id = ?2", (size, id))?;
     Ok(())
 }
 
 /// Updates the filename of a download.
-pub fn update_download_name<P: AsRef<Path>>(
-    db_path: P,
-    id: &str,
-    name: &str,
-) -> SqliteResult<()> {
+pub fn update_download_name<P: AsRef<Path>>(db_path: P, id: &str, name: &str) -> SqliteResult<()> {
     let conn = open_db(db_path)?;
     conn.execute(
         "UPDATE downloads SET filename = ?1 WHERE id = ?2",
@@ -502,10 +497,13 @@ pub fn set_setting<P: AsRef<Path>>(db_path: P, key: &str, value: &str) -> Sqlite
 
 /// Searches for an existing download by its source URL.
 /// Used to prevent redundant transfers or to resume existing ones.
-pub fn find_download_by_url<P: AsRef<Path>>(db_path: P, url: &str) -> SqliteResult<Option<Download>> {
+pub fn find_download_by_url<P: AsRef<Path>>(
+    db_path: P,
+    url: &str,
+) -> SqliteResult<Option<Download>> {
     let conn = open_db(db_path)?;
     let mut stmt = conn.prepare("SELECT id, url, filename, filepath, size, downloaded, status, protocol, speed, connections, created_at, completed_at, error_message, info_hash, metadata, user_agent, cookies, category FROM downloads WHERE url = ?1")?;
-    
+
     let mut rows = stmt.query([url])?;
     if let Some(row) = rows.next()? {
         Ok(Some(row_to_download(row)?))
@@ -522,7 +520,10 @@ pub fn check_filepath_exists<P: AsRef<Path>>(db_path: P, filepath: &str) -> Sqli
 }
 
 /// Stores a batch of chunk metadata for multi-threaded HTTP downloads.
-pub fn insert_chunks<P: AsRef<Path>>(db_path: P, chunks: Vec<crate::downloader::ChunkRecord>) -> SqliteResult<()> {
+pub fn insert_chunks<P: AsRef<Path>>(
+    db_path: P,
+    chunks: Vec<crate::downloader::ChunkRecord>,
+) -> SqliteResult<()> {
     let mut conn = open_db(db_path)?;
     let tx = conn.transaction()?;
     {
@@ -537,7 +538,12 @@ pub fn insert_chunks<P: AsRef<Path>>(db_path: P, chunks: Vec<crate::downloader::
     Ok(())
 }
 
-pub fn update_chunk_progress<P: AsRef<Path>>(db_path: P, download_id: &str, start_byte: i64, downloaded: i64) -> SqliteResult<()> {
+pub fn update_chunk_progress<P: AsRef<Path>>(
+    db_path: P,
+    download_id: &str,
+    start_byte: i64,
+    downloaded: i64,
+) -> SqliteResult<()> {
     let conn = open_db(db_path)?;
     conn.execute(
         "UPDATE chunks SET downloaded = ?1 WHERE download_id = ?2 AND start_byte = ?3",
@@ -566,20 +572,25 @@ pub fn delete_download_chunks<P: AsRef<Path>>(db_path: P, download_id: &str) -> 
     Ok(())
 }
 
-pub fn get_download_chunks<P: AsRef<Path>>(db_path: P, download_id: &str) -> SqliteResult<Vec<crate::downloader::ChunkRecord>> {
+pub fn get_download_chunks<P: AsRef<Path>>(
+    db_path: P,
+    download_id: &str,
+) -> SqliteResult<Vec<crate::downloader::ChunkRecord>> {
     let conn = open_db(db_path)?;
-    let mut stmt = conn.prepare("SELECT start_byte, end_byte, downloaded FROM chunks WHERE download_id = ?1")?;
-    let chunks = stmt.query_map([download_id], |row| {
-        Ok(crate::downloader::ChunkRecord {
-            download_id: download_id.to_string(),
-            start: row.get(0)?,
-            end: row.get(1)?,
-            downloaded: row.get(2)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let mut stmt =
+        conn.prepare("SELECT start_byte, end_byte, downloaded FROM chunks WHERE download_id = ?1")?;
+    let chunks = stmt
+        .query_map([download_id], |row| {
+            Ok(crate::downloader::ChunkRecord {
+                download_id: download_id.to_string(),
+                start: row.get(0)?,
+                end: row.get(1)?,
+                downloaded: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(chunks)
 }
-
 
 /// Get all settings as key-value pairs
 pub fn get_all_settings<P: AsRef<Path>>(
@@ -588,7 +599,9 @@ pub fn get_all_settings<P: AsRef<Path>>(
     let conn = open_db(db_path)?;
     let mut stmt = conn.prepare("SELECT key, value FROM settings ")?;
     let settings = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
     Ok(settings)
 }
@@ -635,11 +648,17 @@ pub fn delete_finished_downloads<P: AsRef<Path>>(db_path: P) -> SqliteResult<()>
         "DELETE FROM downloads WHERE status = 'completed' OR status = 'error'",
         [],
     )?;
-    
+
     // Also cleanup related chunks and history
-    let _ = conn.execute("DELETE FROM chunks WHERE download_id NOT IN (SELECT id FROM downloads)", []);
-    let _ = conn.execute("DELETE FROM history WHERE download_id NOT IN (SELECT id FROM downloads)", []);
-    
+    let _ = conn.execute(
+        "DELETE FROM chunks WHERE download_id NOT IN (SELECT id FROM downloads)",
+        [],
+    );
+    let _ = conn.execute(
+        "DELETE FROM history WHERE download_id NOT IN (SELECT id FROM downloads)",
+        [],
+    );
+
     Ok(())
 }
 
