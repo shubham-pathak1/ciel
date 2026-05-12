@@ -362,10 +362,20 @@ pub(super) async fn run_workers(
                         let mut local_downloaded = chunk.downloaded;
                         let mut last_db_update = std::time::Instant::now();
 
-                        while let Ok(item_opt) =
-                            tokio::time::timeout(std::time::Duration::from_secs(60), stream.next())
-                                .await
-                        {
+                        loop {
+                            let item_opt = match tokio::time::timeout(
+                                std::time::Duration::from_secs(60),
+                                stream.next(),
+                            )
+                            .await
+                            {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    return Err(DownloadError::Network(
+                                        "Connection stalled (no data for 60s)".to_string(),
+                                    ));
+                                }
+                            };
                             if abort_signal.load(Ordering::Relaxed) {
                                 break;
                             }

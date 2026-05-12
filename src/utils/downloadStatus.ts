@@ -6,6 +6,21 @@ export const getFriendlyErrorMessage = (message?: string | null) => {
     const lower = raw.toLowerCase();
 
     if (!raw) return "Something went wrong. Try again.";
+    if (
+        lower.includes("video-downloads.googleusercontent.com") &&
+        (lower.includes("error sending request for url") ||
+            lower.includes("connection reset") ||
+            lower.includes("timed out") ||
+            lower.includes("timeout"))
+    ) {
+        return "This Google media link is temporary and can fail even when fresh. Open the source page again, copy a new direct file URL, then retry with cookies or a browser User-Agent if needed.";
+    }
+    if (lower.includes("error sending request for url")) {
+        return "Could not connect to the download host. The link may be temporary, blocked by the server, or require cookies/User-Agent.";
+    }
+    if (lower.includes("connection stalled")) {
+        return "The server stopped sending data. Retry, or lower parallel connections for this host.";
+    }
     if (lower.includes("invalid url")) return "That link does not look valid. Check it and try again.";
     if (lower.includes("html") || lower.includes("text/html") || lower.includes("<!doctype") || lower.includes("<html")) {
         return "This server returned a web page instead of the file. It may need login cookies or a browser download link.";

@@ -496,7 +496,24 @@ impl Downloader {
         let progress = self.progress.clone();
         let global_speed_limit = self.config.speed_limit;
 
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                stream.next(),
+            )
+            .await
+            {
+                Ok(next) => next,
+                Err(_) => {
+                    return Err(DownloadError::Network(
+                        "Connection stalled (no data for 60s)".to_string(),
+                    ));
+                }
+            };
+            let item = match item {
+                Some(v) => v,
+                None => break,
+            };
             let chunk = item.map_err(|e| DownloadError::Network(e.to_string()))?;
             file.write_all(&chunk).await?;
 
