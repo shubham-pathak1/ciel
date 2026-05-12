@@ -10,7 +10,10 @@ Ciel is still moving toward a proper public beta, but the core app is already us
 
 ## What Ciel currently does
 - Parallel HTTP downloading
+- Adaptive HTTP parallelism (scales workers based on transfer stability)
 - Safe fallback to single connection when a server rejects range requests
+- Host memory for single-connection-only HTTP servers
+- Stall detection (fails fast when a server stops sending data)
 - HTTP pause/resume and restart recovery
 - Magnet torrent support
 - Torrent file selection before starting
@@ -27,6 +30,10 @@ Right now the project is mainly about making the existing downloader more reliab
 - better torrent restore and verification UX
 - fewer misleading states in the UI
 - getting the app ready for a stable beta
+
+## Known limitations
+- Some temporary/signed CDN links (for example, short-lived media URLs) can fail even when copied recently.
+- Some hosts do not reliably support HTTP range requests. Ciel detects this and switches to single connection for stability.
 
 ## Notes
 - Ciel is sidecar-free.
@@ -54,7 +61,11 @@ to:
 and set your preferred `target-dir`.
 
 ## Contributing
-Issues and pull requests are welcome. If you run into a bug, a clear repro and logs help a lot.
+Issues and pull requests are welcome. If you run into a bug, include:
+- a clear repro
+- the URL domain (full URL optional if sensitive)
+- your HTTP connection setting
+- recent app logs around fallback/stall/error behavior
 
 ## License
 MIT
